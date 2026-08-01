@@ -622,8 +622,10 @@ ai_keychain_env_args() {
 gemini() {
   local -a env_args
   local exit_code
+  local env_output
 
-  env_args=("${(@f)$(ai_keychain_env_args)}")
+  env_output="$(ai_keychain_env_args)"
+  [[ -n "$env_output" ]] && env_args=("${(@f)env_output}")
   echo -ne "\033]0;gemini\007"
 
   if (( ${#env_args[@]} )); then
@@ -658,7 +660,10 @@ with-package-auth() {
   shift
 
   local -a env_args
-  env_args=("${(@f)$(package_registry_env_args)}")
+  local env_output
+
+  env_output="$(package_registry_env_args)"
+  [[ -n "$env_output" ]] && env_args=("${(@f)env_output}")
 
   if (( ${#env_args[@]} )); then
     command env "${env_args[@]}" "$cmd" "$@"
