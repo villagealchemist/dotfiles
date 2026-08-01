@@ -1,0 +1,745 @@
+# ───────────────────────────────────────────────────────────────
+# 🪄 @villagealchemist SHELL ✨
+# Interactive-shell config: aliases, functions, prompt, keychain helpers.
+# Durable login environment lives in ~/.zprofile.
+# ───────────────────────────────────────────────────────────────
+
+# Do not load interactive shell config for non-interactive shells.
+[[ $- != *i* ]] && return
+
+# ───────────────────────────────────────────────────────────────
+# 🧱 BASICS
+# ───────────────────────────────────────────────────────────────
+
+export EDITOR="${EDITOR:-code --wait}"
+export VISUAL="${VISUAL:-code --wait}"
+export GIT_EDITOR="${GIT_EDITOR:-code --wait}"
+export LOCAL_BIN="${LOCAL_BIN:-$HOME/bin}"
+
+HISTFILE="${ZDOTDIR:-$HOME}/.zsh_history"
+HISTSIZE=50000
+SAVEHIST=50000
+
+setopt AUTO_CD
+setopt PROMPT_SUBST
+setopt HIST_EXPIRE_DUPS_FIRST
+setopt HIST_IGNORE_ALL_DUPS
+setopt HIST_IGNORE_SPACE
+setopt HIST_REDUCE_BLANKS
+setopt HIST_VERIFY
+setopt SHARE_HISTORY
+setopt APPEND_HISTORY
+
+# ───────────────────────────────────────────────────────────────
+# 🐱 TERMINAL GREETING
+# ───────────────────────────────────────────────────────────────
+
+if [[ -z "$NO_MEOW" ]]; then
+cat << "MEOW"
+       *       ,MMM8&&&.            *
+              MMMM88&&&&&    .
+             MMMM88&&&&&&&
+ *           MMM88&&&&&&&&
+             MMM88&&&&&&&&
+             'MMM88&&&&&&'
+               'MMM8&&&'      *
+      |\___/|
+      ) , , ( meow            .
+     >\  `, /<
+       )===(       *
+      /  ♥  \
+      |     |
+     /       \
+     \       /
+_/_/_/_/_/_/_\__/_/_/_/_/_/_
+|  |  |  |( (  |  |  |  |  |
+|  |  |  | ) ) |  |  |  |  |
+|  |  |  |(_(  |  |  |  |  |
+|  |  |  |  |  |  |  |  |  |
+♥  ♥  ♥  ♥  ♥  ♥  ♥  ♥  ♥  ♥
+MEOW
+fi
+
+# ───────────────────────────────────────────────────────────────
+# 🛣️ PATH HELPERS
+# ───────────────────────────────────────────────────────────────
+
+typeset -U path PATH
+
+path_prepend() {
+  [[ -n "$1" && -d "$1" ]] || return 0
+  path=("$1" "${path[@]}")
+}
+
+path_append() {
+  [[ -n "$1" && -d "$1" ]] || return 0
+
+  local -a updated_path
+  local entry
+  for entry in "${path[@]}"; do
+    [[ "$entry" == "$1" ]] || updated_path+=("$entry")
+  done
+  path=("${updated_path[@]}" "$1")
+}
+
+path_prepend "$LOCAL_BIN"
+path_prepend "$HOME/.local/bin"
+path_prepend "$HOME/bin"
+path_prepend "$HOME/Library/pnpm"
+path_prepend "$HOME/.asdf/shims"
+path_append "$HOME/Library/Application Support/JetBrains/Toolbox/scripts"
+path_append "/Applications/WebStorm.app/Contents/MacOS"
+path_append "/Applications/PyCharm CE.app/Contents/MacOS"
+path_append "/Applications/darktable.app/Contents/MacOS"
+
+# ───────────────────────────────────────────────────────────────
+# 📜 PERSONAL BIN SPELLBOOK
+# ───────────────────────────────────────────────────────────────
+
+alias cdbin='cd "$LOCAL_BIN"'
+alias binls='ls -1 "$LOCAL_BIN" 2>/dev/null | sort'
+alias binstatus='git -C "$LOCAL_BIN" status 2>/dev/null || echo "bin repo not initialized"'
+alias binpull='git -C "$LOCAL_BIN" pull'
+alias binpush='git -C "$LOCAL_BIN" push'
+alias binlog='git -C "$LOCAL_BIN" log --oneline --decorate -n 15'
+alias binedit='code "$LOCAL_BIN"'
+
+bincat() {
+  [[ -n "$1" ]] || { echo "usage: bincat <script-name>"; return 1; }
+  [[ -f "$LOCAL_BIN/$1" ]] || { echo "not found: $LOCAL_BIN/$1"; return 1; }
+  bat "$LOCAL_BIN/$1" 2>/dev/null || cat "$LOCAL_BIN/$1"
+}
+
+bineditfile() {
+  [[ -n "$1" ]] || { echo "usage: bineditfile <script-name>"; return 1; }
+
+  local -a editor_command
+  editor_command=(${(z)EDITOR})
+  "${editor_command[@]}" "$LOCAL_BIN/$1"
+}
+
+binrun() {
+  [[ -n "$1" ]] || { echo "usage: binrun <script-name> [args...]"; return 1; }
+  local script="$1"
+  shift
+  [[ -x "$LOCAL_BIN/$script" ]] || { echo "not executable: $LOCAL_BIN/$script"; return 1; }
+  "$LOCAL_BIN/$script" "$@"
+}
+
+binwhich() {
+  [[ -n "$1" ]] || { echo "usage: binwhich <command>"; return 1; }
+  command -v "$1"
+}
+
+bincheck() {
+  echo "LOCAL_BIN: $LOCAL_BIN"
+  echo
+  echo "In PATH?"
+  case ":$PATH:" in
+    *":$LOCAL_BIN:"*) echo "yes" ;;
+    *) echo "no" ;;
+  esac
+  echo
+  echo "Contents:"
+  ls -la "$LOCAL_BIN" 2>/dev/null || echo "missing: $LOCAL_BIN"
+}
+
+binnew() {
+  [[ -n "$1" ]] || { echo "usage: binnew <script-name>"; return 1; }
+
+  local file="$LOCAL_BIN/$1"
+  mkdir -p "$LOCAL_BIN" || return 1
+
+  if [[ -e "$file" ]]; then
+    echo "already exists: $file"
+    return 1
+  fi
+
+  cat > "$file" <<'SCRIPT'
+#!/usr/bin/env zsh
+set -euo pipefail
+SCRIPT
+
+  chmod +x "$file"
+  "$EDITOR" "$file"
+}
+
+# ───────────────────────────────────────────────────────────────
+# 🏷️ iTerm TITLE HELPERS
+# ───────────────────────────────────────────────────────────────
+
+with-title() {
+  [[ -n "$1" ]] || { echo "usage: with-title <title> <command...>"; return 1; }
+
+  local title="$1"
+  shift
+
+  echo -ne "\033]0;${title}\007"
+  "$@"
+  local exit_code=$?
+  echo -ne "\033]0;zsh\007"
+
+  return $exit_code
+}
+
+run() {
+  with-title "$@"
+}
+
+# ───────────────────────────────────────────────────────────────
+# ⚡ SHELL SESSION HELPERS
+# ───────────────────────────────────────────────────────────────
+
+alias restart='clear && exec $SHELL -l'
+alias revupzsh='source ~/.zshrc'
+alias zedit='code ~/.zshrc'
+alias zpedit='code ~/.zprofile'
+alias zcat='bat ~/.zshrc 2>/dev/null || cat ~/.zshrc'
+alias zpcat='bat ~/.zprofile 2>/dev/null || cat ~/.zprofile'
+alias zcheck='zsh -n ~/.zshrc && echo "zshrc syntax ok"'
+alias zpcheck='zsh -n ~/.zprofile && echo "zprofile syntax ok"'
+kit10() { perl -pe 's/\\e/\e/g' "$@"; }
+
+# ───────────────────────────────────────────────────────────────
+# 💻 SYSTEM INFORMATION
+# ───────────────────────────────────────────────────────────────
+
+alias cpu='sysctl -n machdep.cpu.brand_string'
+alias cores='sysctl -n hw.ncpu'
+alias ram='echo "$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 )) GB"'
+alias cpuarch='uname -m'
+alias macmodel='sysctl -n hw.model'
+alias serial='system_profiler SPHardwareDataType | awk -F": " "/Serial Number/ {print \$2}"'
+alias hardware='system_profiler SPHardwareDataType'
+alias storage='df -h /'
+alias battery='pmset -g batt'
+alias temps='sudo powermetrics --samplers smc | grep -i "CPU die temperature"'
+alias sysinfo='echo "Model: $(sysctl -n hw.model)" && echo "Chip: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)" && echo "Cores: $(sysctl -n hw.ncpu)" && echo "RAM: $(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 )) GB" && echo "Arch: $(uname -m)"'
+
+# ───────────────────────────────────────────────────────────────
+# 🔁 GIT ALIASES + SAFE STACKABLE PUSH
+# ───────────────────────────────────────────────────────────────
+
+alias gss='git status --short'
+alias gst='git status'
+alias gbr='git branch'
+alias gco='git checkout'
+alias gcb='git checkout -b'
+alias gl='git log --oneline --decorate -n 20'
+alias glg='git log --graph --oneline --decorate --all'
+alias gd='git diff'
+alias gds='git diff --staged'
+alias gstat='git diff --stat'
+alias ga='git add'
+alias gc='git commit'
+alias gca='git commit --amend'
+alias gp='git push'
+alias gpl='git pull'
+alias gf='git fetch'
+alias gfo='git fetch origin'
+alias gm='git merge'
+alias gstash='git stash'
+alias grb='git rebase'
+alias gignored='git status --ignored'
+alias gr='git restore'
+alias grs='git restore --staged'
+
+alias pr='gh pr view --web'
+alias prs='gh pr status'
+
+# Stackable git push shorthand.
+# Examples:
+#   push
+#   push origin HEAD
+#   push u origin HEAD
+#   push nv
+#   push lease
+#   push nv lease
+#   push dry nv lease origin HEAD
+push() {
+  local -a git_args
+  local -a push_flags
+  local arg
+
+  for arg in "$@"; do
+    case "$arg" in
+      nv|--nv)
+        push_flags+=(--no-verify)
+        ;;
+      lease|ff|force-with-lease|--force-with-lease)
+        push_flags+=(--force-with-lease)
+        ;;
+      f|force|--force)
+        echo "Refusing unsafe force shorthand. Use 'lease' or 'ff' for --force-with-lease."
+        return 1
+        ;;
+      tags|--tags)
+        push_flags+=(--tags)
+        ;;
+      u|upstream|track)
+        push_flags+=(-u)
+        ;;
+      dry|dry-run|--dry-run)
+        push_flags+=(--dry-run)
+        ;;
+      *)
+        git_args+=("$arg")
+        ;;
+    esac
+  done
+
+  git push "${push_flags[@]}" "${git_args[@]}"
+}
+
+syncmain() {
+  git fetch origin main &&
+    git checkout main &&
+    git pull --ff-only origin main
+}
+
+syncdevelop() {
+  git fetch origin develop &&
+    git checkout develop &&
+    git pull --ff-only origin develop
+}
+
+# AI/manual commit helpers from your personal config
+gai() { git add -A && git commit -m "[AI:accepted] $*"; }
+gaip() { git add -A && git commit -m "[AI:partial] $*"; }
+gair() { git add -A && git commit -m "[AI:rejected] $*"; }
+gman() { git add -A && git commit -m "[manual] $*"; }
+gtest() { git add -A && git commit --allow-empty -m "[test] $*"; }
+
+# ───────────────────────────────────────────────────────────────
+# 🐍 PYTHON
+# ───────────────────────────────────────────────────────────────
+
+alias pip='python3 -m pip'
+alias python='python3'
+alias notebook='python3 -m notebook'
+alias venv='uv venv && source .venv/bin/activate'
+alias charm='pycharm'
+
+# ───────────────────────────────────────────────────────────────
+# 🌐 APP + UTILITY ALIASES
+# ───────────────────────────────────────────────────────────────
+
+alias chrome='open -a "Google Chrome"'
+alias preview='open -a Preview'
+alias countfiles='find . -maxdepth 1 -type f ! -name ".*" | wc -l'
+alias countall='ls -1 | wc -l'
+alias storm='webstorm'
+alias webstorm='nohup webstorm >/dev/null 2>&1 &'
+alias makeicns="$HOME/.scripts/makeicns.sh"
+
+shoop() {
+  open -a "/Applications/Photoshop/Adobe Photoshop 2026.app" "$@" 2>/dev/null || \
+    open -a "/Applications/Adobe Photoshop 2025/Adobe Photoshop 2025.app" "$@"
+}
+
+clone() {
+  [[ -n "$1" ]] || { echo "usage: clone <repo-url> [new-dir]"; return 1; }
+
+  local repo_url="$1"
+  local new_dir="$2"
+  local repo_name
+
+  repo_name="$(echo "$repo_url" | sed -E 's|.*[/:]||; s|\.git$||')"
+
+  if [[ -n "$new_dir" ]]; then
+    git clone "$repo_url" "$new_dir" || return 1
+    cd "$new_dir" || return 1
+  else
+    git clone "$repo_url" || return 1
+    cd "$repo_name" || return 1
+  fi
+}
+
+# Camera SD card helpers
+alias cdcamera='cd /Volumes/Camera/DCIM/100CANON'
+alias ejectcamera='diskutil eject /Volumes/Camera'
+
+# ───────────────────────────────────────────────────────────────
+# 🤖 AI / CODEX / GEMINI
+# ───────────────────────────────────────────────────────────────
+
+alias cdx='codex exec --sandbox workspace-write'
+alias cdxr='codex exec --sandbox read-only'
+
+vcodex() {
+  local seconds="${1:-20}"
+  local audio_file
+  local prompt
+
+  require_keychain OPENAI_API_KEY OPENAI_API_KEY || return 1
+  command -v rec >/dev/null 2>&1 || { echo "missing dependency: rec. Install sox with brew install sox"; return 1; }
+
+  audio_file="$(mktemp -t codex-voice).wav"
+
+  echo "Recording for ${seconds}s..."
+  rec -q -r 16000 -c 1 "$audio_file" trim 0 "$seconds"
+
+  echo "Transcribing..."
+  prompt="$(curl -sS https://api.openai.com/v1/audio/transcriptions \
+    -H "Authorization: Bearer $OPENAI_API_KEY" \
+    -F model="gpt-4o-mini-transcribe" \
+    -F response_format="text" \
+    -F file=@"$audio_file")"
+
+  rm -f "$audio_file"
+
+  echo
+  echo "Prompt:"
+  echo "$prompt"
+  echo
+
+  codex exec --sandbox workspace-write "$prompt"
+}
+
+# ───────────────────────────────────────────────────────────────
+# 🔑 KEYCHAIN + LAZY CREDENTIAL HELPERS
+# ───────────────────────────────────────────────────────────────
+# Rules:
+# - Do not auto-source ~/.env.private.
+# - Do not hardcode secrets here.
+# - Explicit `use-*` helpers export into the current shell.
+# - Wrappers inject secrets only into child processes when possible.
+
+keychain_get() {
+  local service="$1"
+  [[ -n "$service" ]] || { print -u2 "usage: keychain_get <service>"; return 1; }
+
+  security find-generic-password \
+    -a "$USER" \
+    -s "$service" \
+    -w 2>/dev/null
+}
+
+require_keychain() {
+  local var="$1"
+  local service="$2"
+  local value
+
+  [[ -n "$var" && -n "$service" ]] || {
+    print -u2 "usage: require_keychain <ENV_VAR> <keychain-service>"
+    return 1
+  }
+
+  value="$(keychain_get "$service")" || {
+    print -u2 "missing Keychain item: $service"
+    return 1
+  }
+
+  [[ -n "$value" ]] || {
+    print -u2 "empty Keychain item: $service"
+    return 1
+  }
+
+  export "$var=$value"
+}
+
+export_keychain_if_present() {
+  local var="$1"
+  local service="$2"
+  local value
+
+  [[ -n "$var" && -n "$service" ]] || return 0
+
+  value="$(keychain_get "$service")" || return 0
+  [[ -n "$value" ]] || return 0
+
+  export "$var=$value"
+}
+
+export_keychain_first_present() {
+  local var="$1"
+  shift
+
+  local service
+  for service in "$@"; do
+    export_keychain_if_present "$var" "$service"
+    [[ -n "${(P)var}" ]] && return 0
+  done
+
+  return 0
+}
+
+keychain_env_arg_if_present() {
+  local var="$1"
+  local service="$2"
+  local value
+
+  [[ -n "$var" && -n "$service" ]] || return 0
+
+  value="$(keychain_get "$service")" || return 0
+  [[ -n "$value" ]] || return 0
+
+  print -r -- "$var=$value"
+}
+
+keychain_env_arg_first_present() {
+  local var="$1"
+  shift
+
+  local service
+  local arg
+  for service in "$@"; do
+    arg="$(keychain_env_arg_if_present "$var" "$service")" || arg=""
+    if [[ -n "$arg" ]]; then
+      print -r -- "$arg"
+      return 0
+    fi
+  done
+
+  return 0
+}
+
+keychain_set() {
+  local service="$1"
+  local secret
+
+  [[ -n "$service" ]] || {
+    print -u2 "usage: keychain_set <service>"
+    return 1
+  }
+
+  print -n "secret for $service: "
+  read -rs secret
+  print
+
+  [[ -n "$secret" ]] || {
+    print -u2 "empty secret refused"
+    return 1
+  }
+
+  security add-generic-password \
+    -U \
+    -a "$USER" \
+    -s "$service" \
+    -w "$secret"
+}
+
+keychain_delete() {
+  local service="$1"
+
+  [[ -n "$service" ]] || {
+    print -u2 "usage: keychain_delete <service>"
+    return 1
+  }
+
+  security delete-generic-password \
+    -a "$USER" \
+    -s "$service"
+}
+
+keychain_has() {
+  local service="$1"
+
+  [[ -n "$service" ]] || {
+    print -u2 "usage: keychain_has <service>"
+    return 1
+  }
+
+  if security find-generic-password -a "$USER" -s "$service" >/dev/null 2>&1; then
+    echo "$service: present"
+  else
+    echo "$service: missing"
+    return 1
+  fi
+}
+
+keychain_audit() {
+  local services=(
+    EMAIL
+    github.com
+    OPENAI_API_KEY
+    GEMINI_API_KEY
+    GOOGLE_API_KEY
+    ANTHROPIC_API_KEY
+  )
+
+  local service
+  for service in "${services[@]}"; do
+    keychain_has "$service" || true
+  done
+}
+
+gh-token() {
+  keychain_get github.com
+}
+
+use-gh-token() {
+  require_keychain GITHUB_TOKEN github.com || return 1
+  export NPM_TOKEN="$GITHUB_TOKEN"
+  export CHANGELOG_GITHUB_TOKEN="$GITHUB_TOKEN"
+  echo "GITHUB_TOKEN, NPM_TOKEN, and CHANGELOG_GITHUB_TOKEN loaded."
+}
+
+use-openai() {
+  require_keychain OPENAI_API_KEY OPENAI_API_KEY
+}
+
+use-gemini-api() {
+  require_keychain GEMINI_API_KEY GEMINI_API_KEY
+}
+
+use-google-api() {
+  require_keychain GOOGLE_API_KEY GOOGLE_API_KEY
+}
+
+use-anthropic() {
+  require_keychain ANTHROPIC_API_KEY ANTHROPIC_API_KEY
+}
+
+use-ai-env() {
+  export_keychain_if_present OPENAI_API_KEY OPENAI_API_KEY
+  export_keychain_if_present GEMINI_API_KEY GEMINI_API_KEY
+  export_keychain_if_present GOOGLE_API_KEY GOOGLE_API_KEY
+  export_keychain_if_present ANTHROPIC_API_KEY ANTHROPIC_API_KEY
+  use-gh-token 2>/dev/null || true
+}
+
+ai_keychain_env_args() {
+  local -a env_args
+  local github_token
+  local arg
+
+  github_token="$(keychain_get github.com 2>/dev/null)" || github_token=""
+
+  if [[ -n "$github_token" ]]; then
+    env_args+=("GITHUB_TOKEN=$github_token")
+    env_args+=("NPM_TOKEN=$github_token")
+    env_args+=("CHANGELOG_GITHUB_TOKEN=$github_token")
+  fi
+
+  arg="$(keychain_env_arg_if_present OPENAI_API_KEY OPENAI_API_KEY)" && [[ -n "$arg" ]] && env_args+=("$arg")
+  arg="$(keychain_env_arg_if_present GEMINI_API_KEY GEMINI_API_KEY)" && [[ -n "$arg" ]] && env_args+=("$arg")
+  arg="$(keychain_env_arg_if_present GOOGLE_API_KEY GOOGLE_API_KEY)" && [[ -n "$arg" ]] && env_args+=("$arg")
+  arg="$(keychain_env_arg_if_present ANTHROPIC_API_KEY ANTHROPIC_API_KEY)" && [[ -n "$arg" ]] && env_args+=("$arg")
+
+  print -r -- "${env_args[@]}"
+}
+
+gemini() {
+  local -a env_args
+  local exit_code
+
+  env_args=("${(@f)$(ai_keychain_env_args)}")
+  echo -ne "\033]0;gemini\007"
+
+  if (( ${#env_args[@]} )); then
+    command env "${env_args[@]}" gemini "$@"
+    exit_code=$?
+  else
+    command gemini "$@"
+    exit_code=$?
+  fi
+
+  echo -ne "\033]0;zsh\007"
+  return $exit_code
+}
+
+gemini-auth() {
+  gemini "$@"
+}
+
+package_registry_env_args() {
+  local github_token
+  github_token="$(keychain_get github.com 2>/dev/null)" || github_token=""
+
+  if [[ -n "$github_token" ]]; then
+    print -r -- "GITHUB_TOKEN=$github_token"
+    print -r -- "NPM_TOKEN=$github_token"
+    print -r -- "CHANGELOG_GITHUB_TOKEN=$github_token"
+  fi
+}
+
+with-package-auth() {
+  local cmd="$1"
+  shift
+
+  local -a env_args
+  env_args=("${(@f)$(package_registry_env_args)}")
+
+  if (( ${#env_args[@]} )); then
+    command env "${env_args[@]}" "$cmd" "$@"
+  else
+    command "$cmd" "$@"
+  fi
+}
+
+npm() {
+  with-package-auth npm "$@"
+}
+
+npx() {
+  with-package-auth npx "$@"
+}
+
+pnpm() {
+  with-package-auth pnpm "$@"
+}
+
+# ───────────────────────────────────────────────────────────────
+# 🧰 OPTIONAL REPO ENV BOOTSTRAPPER
+# ───────────────────────────────────────────────────────────────
+
+if [[ -f "$HOME/.config/repoenv/repoenv.zsh" ]]; then
+  source "$HOME/.config/repoenv/repoenv.zsh"
+fi
+
+repojump() {
+  emulate -L zsh
+  setopt err_return pipe_fail
+
+  local name="$1"
+  local dir="$2"
+
+  [[ -d "$dir" ]] || {
+    print -u2 "$name: missing repo at $dir"
+    return 1
+  }
+
+  cd "$dir" || {
+    print -u2 "$name: failed to cd to $dir"
+    return 1
+  }
+
+  if (( $+functions[repoenv] )); then
+    repoenv || return 1
+  fi
+}
+
+# ───────────────────────────────────────────────────────────────
+# 🧪 LOCAL PROJECT GLOBAL IGNORES
+# ───────────────────────────────────────────────────────────────
+
+global-ignore-add() {
+  [[ -n "$1" ]] || { echo "usage: global-ignore-add <pattern>"; return 1; }
+
+  local ignore_file
+  ignore_file="$(git config --global core.excludesfile)"
+
+  if [[ -z "$ignore_file" ]]; then
+    ignore_file="$HOME/.gitignore_global"
+    git config --global core.excludesfile "$ignore_file"
+  fi
+
+  touch "$ignore_file"
+
+  if grep -Fxq "$1" "$ignore_file"; then
+    echo "already ignored globally: $1"
+  else
+    echo "$1" >> "$ignore_file"
+    echo "added global ignore: $1"
+  fi
+}
+
+# ───────────────────────────────────────────────────────────────
+# 🎨 PROMPT + FINAL PATH DEDUPE
+# ───────────────────────────────────────────────────────────────
+
+autoload -U colors && colors
+PROMPT='%F{default}alchemist@village%f %F{magenta}%~%f %F{cyan}%#%f '
+
+# PATH remains deduplicated by its unique-array attribute.
