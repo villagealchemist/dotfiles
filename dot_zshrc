@@ -148,6 +148,7 @@ binnew() {
   [[ -n "$1" ]] || { echo "usage: binnew <script-name>"; return 1; }
 
   local file="$LOCAL_BIN/$1"
+  local -a editor_command
   mkdir -p "$LOCAL_BIN" || return 1
 
   if [[ -e "$file" ]]; then
@@ -161,7 +162,8 @@ set -euo pipefail
 SCRIPT
 
   chmod +x "$file"
-  "$EDITOR" "$file"
+  editor_command=(${(z)EDITOR})
+  "${editor_command[@]}" "$file"
 }
 
 # ───────────────────────────────────────────────────────────────
@@ -220,29 +222,26 @@ alias sysinfo='echo "Model: $(sysctl -n hw.model)" && echo "Chip: $(sysctl -n ma
 # 🔁 GIT ALIASES + SAFE STACKABLE PUSH
 # ───────────────────────────────────────────────────────────────
 
-alias gss='git status --short'
-alias gst='git status'
-alias gbr='git branch'
-alias gco='git checkout'
-alias gcb='git checkout -b'
-alias gl='git log --oneline --decorate -n 20'
-alias glg='git log --graph --oneline --decorate --all'
-alias gd='git diff'
-alias gds='git diff --staged'
-alias gstat='git diff --stat'
-alias ga='git add'
-alias gc='git commit'
-alias gca='git commit --amend'
-alias gp='git push'
-alias gpl='git pull'
-alias gf='git fetch'
-alias gfo='git fetch origin'
-alias gm='git merge'
-alias gstash='git stash'
-alias grb='git rebase'
-alias gignored='git status --ignored'
-alias gr='git restore'
-alias grs='git restore --staged'
+alias branch='git branch'
+alias log='git log'
+alias checkout='git checkout'
+alias add='git add'
+alias status='git status'
+alias commit='git commit'
+alias amend='git commit --amend'
+alias pull='git pull'
+alias merge='git merge'
+alias ignored='git status --ignored'
+alias stash='git stash'
+alias rebase='git rebase'
+alias fetch='git fetch'
+alias origin='git fetch origin'
+alias restore='git restore'
+alias diff='git diff'
+alias diff-staged='git diff --staged'
+alias diff-files='git diff --stat'
+alias log-pretty='git log --pretty=oneline --abbrev-commit'
+alias log-graph='git log --graph --oneline --all'
 
 alias pr='gh pr view --web'
 alias prs='gh pr status'
