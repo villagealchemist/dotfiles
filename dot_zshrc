@@ -740,6 +740,16 @@ global-ignore-add() {
 }
 
 # ───────────────────────────────────────────────────────────────
+# Docker Desktop completions
+
+if [[ -d "$HOME/.docker/completions" ]]; then
+  typeset -U fpath FPATH
+  fpath=("$HOME/.docker/completions" "${fpath[@]}")
+  autoload -Uz compinit
+  compinit
+fi
+
+# ───────────────────────────────────────────────────────────────
 # 🎨 PROMPT + FINAL PATH DEDUPE
 # ───────────────────────────────────────────────────────────────
 

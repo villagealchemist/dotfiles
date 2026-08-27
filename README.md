@@ -20,7 +20,7 @@ Fork the repository first if you intend to use it as your own dotfiles. At minim
 | --- | --- |
 | `dot_gitconfig` | Contains my name and public email address. Replace both with yours. |
 | `dot_zshrc` | Includes my aliases, `alchemist@village` prompt label, preferred applications, camera mount path, Keychain service names, and tool wrappers. |
-| `dot_zprofile` | Prefers Apple Silicon Homebrew and adds paths for tools I use. Missing directories are skipped. |
+| `dot_zprofile` | Prefers Apple Silicon Homebrew and adds optional paths for Docker Desktop, Icon Forge, and other tools I use. Missing directories are skipped. |
 | `alchemist.json` | An iTerm2 profile that must be imported manually. |
 
 Inspect the rendered changes before applying:
@@ -37,7 +37,7 @@ The shell files require macOS and zsh. Chezmoi is the only installation dependen
 brew install chezmoi
 ```
 
-Everything else is optional and guarded where practical. My setup makes use of Homebrew, VS Code, `bat`, GitHub CLI, `uv`, `asdf`, pnpm, SoX, iTerm2, Codex, and Gemini when they are installed.
+Everything else is optional and guarded where practical. My setup makes use of Homebrew, VS Code, `bat`, GitHub CLI, `uv`, `asdf`, pnpm, SoX, iTerm2, Docker Desktop, Icon Forge, Codex, and Gemini when they are installed.
 
 ## Install
 

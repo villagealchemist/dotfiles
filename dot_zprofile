@@ -20,6 +20,9 @@ export AWS_PAGER=""
 # Browser preference
 export BROWSER="${BROWSER:-Google Chrome}"
 
+# Icon Forge
+export ICONFORGE_ICON_ROOT="${ICONFORGE_ICON_ROOT:-$HOME/Desktop/artistry/app-icons}"
+
 # ───────────────────────────────────────────────────────────────
 # 🛣️ PATH HELPERS
 # ───────────────────────────────────────────────────────────────
@@ -46,6 +49,7 @@ path_append() {
 path_prepend "/usr/local/bin"
 path_prepend "$HOME/bin"
 path_prepend "$HOME/.local/bin"
+path_append "$HOME/.docker/bin"
 
 # Homebrew priority on Apple Silicon
 if [[ -x /opt/homebrew/bin/brew ]]; then
