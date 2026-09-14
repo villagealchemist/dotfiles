@@ -87,6 +87,9 @@ path_prepend "$HOME/.local/bin"
 path_prepend "$HOME/bin"
 path_prepend "$HOME/Library/pnpm"
 path_prepend "$HOME/.asdf/shims"
+export PROTO_HOME="${PROTO_HOME:-$HOME/.proto}"
+path_prepend "$PROTO_HOME/shims"
+path_prepend "$PROTO_HOME/bin"
 path_append "$HOME/Library/Application Support/JetBrains/Toolbox/scripts"
 path_append "/Applications/WebStorm.app/Contents/MacOS"
 path_append "/Applications/PyCharm CE.app/Contents/MacOS"
@@ -98,11 +101,33 @@ path_append "/Applications/darktable.app/Contents/MacOS"
 
 alias cdbin='cd "$LOCAL_BIN"'
 alias binls='ls -1 "$LOCAL_BIN" 2>/dev/null | sort'
-alias binstatus='git -C "$LOCAL_BIN" status 2>/dev/null || echo "bin repo not initialized"'
-alias binpull='git -C "$LOCAL_BIN" pull'
-alias binpush='git -C "$LOCAL_BIN" push'
-alias binlog='git -C "$LOCAL_BIN" log --oneline --decorate -n 15'
-alias binedit='code "$LOCAL_BIN"'
+
+binstatus() {
+  chezmoi status "$LOCAL_BIN"
+  chezmoi git -- status --short -- home/bin
+}
+
+binpull() {
+  chezmoi git pull -- --autostash --rebase || return
+  chezmoi apply "$LOCAL_BIN"
+}
+
+binpush() {
+  print -u2 "pushing the shared dotfiles repo; ~/bin is managed by chezmoi"
+  chezmoi git -- push "$@"
+}
+
+binlog() {
+  chezmoi git -- log --oneline --decorate -n 15 -- home/bin
+}
+
+binedit() {
+  local source_bin
+  local -a editor_command
+  source_bin="$(chezmoi source-path "$LOCAL_BIN")" || return 1
+  editor_command=(${(z)EDITOR})
+  "${editor_command[@]}" "$source_bin"
+}
 
 bincat() {
   [[ -n "$1" ]] || { echo "usage: bincat <script-name>"; return 1; }
@@ -112,10 +137,8 @@ bincat() {
 
 bineditfile() {
   [[ -n "$1" ]] || { echo "usage: bineditfile <script-name>"; return 1; }
-
-  local -a editor_command
-  editor_command=(${(z)EDITOR})
-  "${editor_command[@]}" "$LOCAL_BIN/$1"
+  [[ -f "$LOCAL_BIN/$1" ]] || { echo "not found: $LOCAL_BIN/$1"; return 1; }
+  chezmoi edit --apply "$LOCAL_BIN/$1"
 }
 
 binrun() {
@@ -163,7 +186,9 @@ SCRIPT
 
   chmod +x "$file"
   editor_command=(${(z)EDITOR})
-  "${editor_command[@]}" "$file"
+  "${editor_command[@]}" "$file" || return
+  chezmoi add "$file"
+  echo "managed by chezmoi: $(chezmoi source-path "$file")"
 }
 
 # ───────────────────────────────────────────────────────────────
@@ -328,7 +353,8 @@ alias preview='open -a Preview'
 alias countfiles='find . -maxdepth 1 -type f ! -name ".*" | wc -l'
 alias countall='ls -1 | wc -l'
 alias storm='webstorm'
-alias webstorm='nohup webstorm >/dev/null 2>&1 &'
+alias ws='webstorm'
+alias webstorm='/usr/bin/open -b com.jetbrains.WebStorm'
 alias makeicns="$HOME/.scripts/makeicns.sh"
 
 shoop() {

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  bundlecrypt pack <output-name> <path> [path ...]
+  bundlecrypt unpack <archive.tar.gz.gpg> [destination]
+
+Examples:
+  bundlecrypt pack my-app "/Applications/My App.app" "$HOME/Documents/My App Extras"
+  bundlecrypt unpack my-app.tar.gz.gpg "$HOME/Desktop/my-app-restored"
+USAGE
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    printf 'Missing required command: %s\n' "$1" >&2
+    if [[ "$1" == "gpg" ]]; then
+      printf 'Install it with: brew install gnupg\n' >&2
+    fi
+    exit 1
+  }
+}
+
+require_command tar
+require_command gpg
+
+command_name="${1:-}"
+
+case "$command_name" in
+  pack)
+    shift
+    [[ $# -ge 2 ]] || usage
+
+    output="$1"
+    shift
+
+    case "$output" in
+      *.tar.gz.gpg) ;;
+      *.tar.gz) output="${output}.gpg" ;;
+      *.gpg) output="${output%.gpg}.tar.gz.gpg" ;;
+      *) output="${output}.tar.gz.gpg" ;;
+    esac
+
+    if [[ -e "$output" ]]; then
+      printf 'Refusing to overwrite existing file: %s\n' "$output" >&2
+      exit 1
+    fi
+
+    tar_args=()
+
+    for item in "$@"; do
+      item="${item%/}"
+
+      if [[ ! -e "$item" ]]; then
+        printf 'Path does not exist: %s\n' "$item" >&2
+        exit 1
+      fi
+
+      parent="$(cd "$(dirname "$item")" && pwd -P)"
+      base="$(basename "$item")"
+      tar_args+=( -C "$parent" "$base" )
+    done
+
+    partial="${output}.partial.$$"
+    trap 'rm -f "$partial"' EXIT
+
+    tar -czf - "${tar_args[@]}" | gpg --symmetric --cipher-algo AES256 --output "$partial"
+    mv "$partial" "$output"
+    trap - EXIT
+
+    printf 'Created: %s\n' "$output"
+    ;;
+
+  unpack)
+    shift
+    [[ $# -ge 1 && $# -le 2 ]] || usage
+
+    archive="$1"
+    destination="${2:-.}"
+
+    if [[ ! -f "$archive" ]]; then
+      printf 'Archive does not exist: %s\n' "$archive" >&2
+      exit 1
+    fi
+
+    mkdir -p "$destination"
+    gpg --decrypt "$archive" | tar -xzf - -C "$destination"
+
+    printf 'Extracted into: %s\n' "$destination"
+    ;;
+
+  *)
+    usage
+    ;;
+esac

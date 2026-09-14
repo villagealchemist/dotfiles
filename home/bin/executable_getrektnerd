@@ -1,0 +1,1396 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Kept in this file so getrektnerd can travel as one standalone bin script.
+# Resolves a direct .app path or a human-friendly app name to an installed bundle.
+resolve_app_path() {
+  local input="$1"
+  [[ -z "$input" ]] && return 1
+
+  normalize() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ._-'
+  }
+
+  local needle
+  needle=$(normalize "$input")
+
+  # 1. Direct absolute .app path.
+  if [[ -d "$input" && "$input" == *.app ]]; then
+    [[ -f "$input/Contents/Info.plist" ]] && echo "$input" && return 0
+  fi
+
+  local matches=()
+  local exact_matches=()
+  local suffix_matches=()
+
+  # 2. Scan real app bundles (nested up to depth 3).
+  while IFS= read -r app; do
+    local base
+    local normalized_base
+    base=$(basename "$app" .app)
+    normalized_base=$(normalize "$base")
+
+    if [[ "$normalized_base" == "$needle" ]]; then
+      exact_matches+=("$app")
+    fi
+
+    if [[ "$normalized_base" == *"$needle" ]]; then
+      suffix_matches+=("$app")
+    fi
+
+    if [[ "$normalized_base" == *"$needle"* ]]; then
+      matches+=("$app")
+    fi
+  done < <(
+    find /Applications "$HOME/Applications" \
+      -maxdepth 4 \
+      -type d \
+      -name "*.app" \
+      ! -path "*/Contents/*" \
+      2>/dev/null
+  )
+
+  # 3. Prefer a unique exact or suffix match.
+  if [[ ${#exact_matches[@]} -eq 1 ]]; then
+    echo "${exact_matches[0]}"
+    return 0
+  fi
+
+  if [[ ${#suffix_matches[@]} -eq 1 ]]; then
+    echo "${suffix_matches[0]}"
+    return 0
+  fi
+
+  # 4. Return a unique general bundle match.
+  if [[ ${#matches[@]} -eq 1 ]]; then
+    echo "${matches[0]}"
+    return 0
+  fi
+
+  # 5. Let a person choose when the name is ambiguous.
+  if [[ ${#matches[@]} -gt 1 ]]; then
+    printf '%s\n' "⟁  multiple matches:" >&2
+    for i in "${!matches[@]}"; do
+      printf "    [%d] %s\n" "$i" "${matches[$i]}" >&2
+    done
+    read -rp "    choose index: " idx </dev/tty \
+      || return 1
+    [[ "$idx" =~ ^[0-9]+$ && "$idx" -lt ${#matches[@]} ]] \
+      || return 1
+    echo "${matches[$idx]}"
+    return 0
+  fi
+
+  # 6. No bundle matched — look inside a similarly named install directory.
+  while IFS= read -r dir; do
+    local dname
+    dname=$(basename "$dir")
+    if [[ "$(normalize "$dname")" == *"$needle"* ]]; then
+      local inner
+      inner=$(find "$dir" \
+        -maxdepth 3 \
+        -type d \
+        -name "*.app" \
+        -exec test -f "{}/Contents/Info.plist" \; \
+        -print \
+        -quit)
+
+      [[ -n "$inner" ]] && echo "$inner" && return 0
+    fi
+  done < <(
+    find /Applications "$HOME/Applications" \
+      -maxdepth 2 \
+      -type d \
+      2>/dev/null
+  )
+
+  return 1
+}
+
+FERMENT=false
+SILENT=false
+DRY_RUN=false
+LEFTOVERS_ONLY=false
+TARGET_KIND="name"
+TARGET_INPUT=""
+IDENTIFIER_INPUTS=()
+
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_CYAN=$'\033[36m'
+else
+  C_RESET=""
+  C_BOLD=""
+  C_DIM=""
+  C_RED=""
+  C_GREEN=""
+  C_CYAN=""
+fi
+
+usage() {
+  cat <<'EOF'
+🪄 getrektnerd
+
+  A tiny removal hex for applications and their dusty little leftovers.
+  It accepts an app name like "Google Chrome" or a direct install path like
+  "~/Applications/Foo.app", "./Some Folder/Bar.app", or "/Applications/Adobe Bridge 2026"
+  and no-scope headshots it  from across the map... while camping the spawn to pre-nerf Commando knife-lunge any threats it
+  may have planted in or around its base before it can even get to the spectate cam let alone respawn
+    ~ xoXalcheXnvrXmissedXox
+
+Usage:
+  getrektnerd [options] <app-name>
+  getrektnerd [options] --path <path-to-app-bundle>
+  getrektnerd [options] -- <app-name with leading dashes somehow>
+
+Options:
+  -f, --fermentaboutit   After nuking the app, try to reinstall a matching
+                         Homebrew cask or formula using the resolved app name;
+                         matching installers in ~/Downloads are purged too.
+  -p, --path             Treat the target as a direct install path.
+                         Works with absolute, ~/home, relative paths, .app bundles,
+                         and app directories like Adobe's little cursed dollhouses.
+  -i, --identifier ID    Add a bundle-ID or package-ID prefix to the hunt.
+                         Repeatable; useful after the app bundle is already gone.
+  -l, --leftovers-only   Do not resolve or remove an app bundle; purge its debris.
+  -n, --dry-run          Print the exact purge manifest without changing anything,
+                         asking for sudo, stopping processes, or invoking Homebrew.
+  -s, --silent           Keep stdout quiet unless something actually goes wrong.
+  -h, --help             Open the spellbook you are holding right now.
+
+Examples:
+  getrektnerd "Google Chrome"
+  getrektnerd Chrome
+  getrektnerd -f "Google Chrome"
+  getrektnerd --fermentaboutit Chrome
+  getrektnerd -s Chrome
+  getrektnerd -p /Applications/Google\ Chrome.app
+  getrektnerd --path ~/Applications/My\ Weird\ App.app
+  getrektnerd --path ./Downloads/Test.app
+  getrektnerd "Adobe Bridge 2026"
+  getrektnerd /Applications/Adobe\ Creative\ Cloud
+  getrektnerd --dry-run Chrome
+  getrektnerd --leftovers-only --identifier com.razer Razer
+
+What gets swept away:
+  - the app bundle itself
+  - identity-matched user and system Library leftovers
+  - launch jobs, privileged helpers, package receipts, and managed extensions
+  - LaunchServices refresh and Dock/Finder nudges
+
+Sharp edges:
+  - this script uses sudo for system-level cleanup and app removal when needed
+  - fuzzy name matching may prompt if multiple bundles smell similar
+  - managed system extensions may require macOS approval or a restart to disappear
+  - brew search can still be moody on locked-down machines
+
+EOF
+}
+
+die() {
+  printf '%s❌ %s%s\n' "$C_RED$C_BOLD" "$*" "$C_RESET" >&2
+  exit 1
+}
+
+spacer() {
+  printf '\n'
+}
+
+log_line() {
+  printf '%s\n' "$1"
+}
+
+log_detail() {
+  printf '%s   %s%s\n' "$C_DIM" "$1" "$C_RESET"
+}
+
+log_section() {
+  spacer
+  printf '%s%s%s\n' "$C_CYAN$C_BOLD" "━━ $1" "$C_RESET"
+}
+
+log_success() {
+  printf '%s%s%s\n' "$C_GREEN$C_BOLD" "$1" "$C_RESET"
+}
+
+run_as_root() {
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+prewarm_root_auth() {
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    return 0
+  fi
+
+  log_section "🔐 Waking the gatekeeper so the rest of the purge can flow."
+  sudo -v
+}
+
+expand_path() {
+  local raw_path="$1"
+
+  case "$raw_path" in
+    "~")
+      printf '%s\n' "$HOME"
+      ;;
+    \~/*)
+      printf '%s/%s\n' "$HOME" "${raw_path#"~/"}"
+      ;;
+    *)
+      printf '%s\n' "$raw_path"
+      ;;
+  esac
+}
+
+normalize_name() {
+  printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ._-'
+}
+
+slugify_for_brew() {
+  printf '%s\n' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+trim_whitespace() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s\n' "$s"
+}
+
+collect_install_targets() {
+  local input="$1"
+  local needle
+  local exact_dirs=()
+
+  needle="$(normalize_name "$input")"
+
+  while IFS= read -r candidate; do
+    local base_name
+    base_name="$(basename "$candidate")"
+
+    if [[ "$(normalize_name "$base_name")" == "$needle" ]]; then
+      exact_dirs+=("$candidate")
+    fi
+  done < <(
+    find /Applications "$HOME/Applications" \
+      -maxdepth 3 \
+      -type d \
+      ! -path "*/Contents/*" \
+      2>/dev/null
+  )
+
+  if [[ ${#exact_dirs[@]} -gt 1 ]]; then
+    printf '%s\n' "${exact_dirs[@]}"
+    return 0
+  fi
+
+  if [[ ${#exact_dirs[@]} -eq 1 ]]; then
+    printf '%s\n' "${exact_dirs[0]}"
+    return 0
+  fi
+
+  resolve_app_path "$input"
+}
+
+lowercase() {
+  printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+array_contains() {
+  local needle="$1"
+  shift || true
+  local item
+
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+
+  return 1
+}
+
+append_clean_name() {
+  local value
+  value="$(trim_whitespace "${1:-}")"
+  [[ -n "$value" ]] || return 0
+  array_contains "$value" "${CLEAN_NAMES[@]:-}" || CLEAN_NAMES+=("$value")
+}
+
+append_identity_name() {
+  local value
+  value="$(trim_whitespace "${1:-}")"
+  [[ -n "$value" ]] || return 0
+  array_contains "$value" "${IDENTITY_NAMES[@]:-}" || IDENTITY_NAMES+=("$value")
+}
+
+append_bundle_id() {
+  local value
+  value="$(trim_whitespace "${1:-}")"
+  [[ -n "$value" ]] || return 0
+  array_contains "$value" "${APP_BUNDLE_IDS[@]:-}" || APP_BUNDLE_IDS+=("$value")
+}
+
+append_identifier_prefix() {
+  local value
+  value="$(lowercase "$(trim_whitespace "${1:-}")")"
+  value="${value%.}"
+  [[ -n "$value" ]] || return 0
+  array_contains "$value" "${IDENTIFIER_PREFIXES[@]:-}" || IDENTIFIER_PREFIXES+=("$value")
+}
+
+append_executable() {
+  local value
+  value="$(trim_whitespace "${1:-}")"
+  [[ -n "$value" ]] || return 0
+  array_contains "$value" "${APP_EXECUTABLES[@]:-}" || APP_EXECUTABLES+=("$value")
+}
+
+append_process_path() {
+  local value
+  value="$(trim_whitespace "${1:-}")"
+  [[ -n "$value" ]] || return 0
+  array_contains "$value" "${PROCESS_PATHS[@]:-}" || PROCESS_PATHS+=("$value")
+}
+
+append_package_receipt() {
+  local value="${1:-}"
+  [[ -n "$value" ]] || return 0
+  array_contains "$value" "${PACKAGE_RECEIPTS[@]:-}" || PACKAGE_RECEIPTS+=("$value")
+}
+
+append_system_extension() {
+  local team_id="${1:--}"
+  local bundle_id="${2:-}"
+  local bundle_path="${3:-}"
+  local record
+  local existing_team
+  local existing_bundle
+  local i
+
+  [[ -n "$bundle_id" ]] || return 0
+  [[ -n "$team_id" ]] || team_id="-"
+  record="${team_id}|${bundle_id}|${bundle_path}"
+
+  if (( ${#SYSTEM_EXTENSIONS[@]} > 0 )); then
+    for i in "${!SYSTEM_EXTENSIONS[@]}"; do
+      IFS='|' read -r existing_team existing_bundle _ <<< "${SYSTEM_EXTENSIONS[$i]}"
+      if [[ "$existing_team" == "$team_id" && "$existing_bundle" == "$bundle_id" ]]; then
+        if [[ "$bundle_path" == /Library/SystemExtensions/* ]]; then
+          SYSTEM_EXTENSIONS[i]="$record"
+        fi
+        return 0
+      fi
+    done
+  fi
+
+  SYSTEM_EXTENSIONS+=("$record")
+}
+
+string_relates_to_clean_name() {
+  local value_norm
+  local clean_name
+  local clean_norm
+
+  value_norm="$(normalize_name "$1")"
+  (( ${#value_norm} >= 4 )) || return 1
+
+  for clean_name in "${IDENTITY_NAMES[@]:-}"; do
+    clean_norm="$(normalize_name "$clean_name")"
+    (( ${#clean_norm} >= 4 )) || continue
+    if [[ "$value_norm" == *"$clean_norm"* || "$clean_norm" == *"$value_norm"* ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+derive_identity_from_identifier() {
+  local identifier
+  local components=()
+  local clean_name
+  local clean_norm
+  local component_norm
+  local prefix
+  local i
+  local j
+
+  identifier="$(lowercase "${1:-}")"
+  [[ "$identifier" == *.* ]] || return 1
+  IFS='.' read -r -a components <<< "$identifier"
+
+  for clean_name in "${IDENTITY_NAMES[@]:-}"; do
+    clean_norm="$(normalize_name "$clean_name")"
+    (( ${#clean_norm} >= 4 )) || continue
+
+    for ((i = 0; i < ${#components[@]}; i++)); do
+      component_norm="$(normalize_name "${components[$i]}")"
+      if [[ "$component_norm" == "$clean_norm" ]]; then
+        prefix="${components[0]}"
+        for ((j = 1; j <= i; j++)); do
+          prefix+=".${components[$j]}"
+        done
+        append_identifier_prefix "$prefix"
+        if [[ "$prefix" == com.* ]]; then
+          append_identifier_prefix "group.${prefix#com.}"
+        fi
+        return 0
+      fi
+    done
+  done
+
+  return 1
+}
+
+collect_related_identifier_names() {
+  local identifier="${1:-}"
+  local components=()
+  local component
+  local component_norm
+  local i
+
+  IFS='.' read -r -a components <<< "$identifier"
+  for ((i = ${#components[@]} - 1; i >= 0; i--)); do
+    component="${components[$i]}"
+    component_norm="$(normalize_name "$component")"
+    case "$component_norm" in
+      ""|app|com|org|net|io|helper|renderer|plugin|gpu|electron)
+        continue
+        ;;
+    esac
+    (( ${#component_norm} >= 4 )) || continue
+    if string_relates_to_clean_name "$component"; then
+      append_clean_name "$component"
+      break
+    fi
+  done
+}
+
+plist_value() {
+  local key="$1"
+  local plist="$2"
+  plutil -extract "$key" raw -o - "$plist" 2>/dev/null || true
+}
+
+codesign_team_id() {
+  local bundle_path="$1"
+  codesign -dv --verbose=4 "$bundle_path" 2>&1 \
+    | sed -n 's/^TeamIdentifier=//p' \
+    | head -n 1 \
+    || true
+}
+
+collect_primary_bundle_metadata() {
+  local plist="$1"
+  local bundle_id
+  local bundle_name
+  local display_name
+  local executable
+
+  [[ -f "$plist" ]] || return 0
+  bundle_id="$(plist_value CFBundleIdentifier "$plist")"
+  bundle_name="$(plist_value CFBundleName "$plist")"
+  display_name="$(plist_value CFBundleDisplayName "$plist")"
+  executable="$(plist_value CFBundleExecutable "$plist")"
+
+  if [[ -n "$bundle_id" ]]; then
+    append_bundle_id "$bundle_id"
+    collect_related_identifier_names "$bundle_id"
+  fi
+  [[ -n "$executable" ]] && append_executable "$executable"
+  [[ -n "$bundle_name" ]] && string_relates_to_clean_name "$bundle_name" \
+    && append_clean_name "$bundle_name"
+  [[ -n "$display_name" ]] && string_relates_to_clean_name "$display_name" \
+    && append_clean_name "$display_name"
+}
+
+collect_bundle_metadata() {
+  local install_path="$1"
+  local app_bundle
+  local relative_bundle
+  local plist
+  local bundle_id
+  local executable
+  local dext
+  local team_id
+
+  [[ -d "$install_path" ]] || return 0
+
+  if [[ "$install_path" == *.app ]]; then
+    collect_primary_bundle_metadata "$install_path/Contents/Info.plist"
+  else
+    while IFS= read -r app_bundle; do
+      relative_bundle="${app_bundle#"$install_path"/}"
+      [[ "$relative_bundle" == */Contents/* ]] && continue
+      collect_primary_bundle_metadata "$app_bundle/Contents/Info.plist"
+    done < <(find "$install_path" -type d -name '*.app' -print 2>/dev/null)
+  fi
+
+  # Nested helpers contribute executable names for process shutdown, but not
+  # cleanup identities: vendor-wide updaters embedded in one app may be shared.
+  while IFS= read -r plist; do
+    executable="$(plist_value CFBundleExecutable "$plist")"
+    [[ -n "$executable" ]] && append_executable "$executable"
+  done < <(find "$install_path" -path '*/Contents/Info.plist' -type f -print 2>/dev/null)
+
+  while IFS= read -r dext; do
+    plist="$dext/Contents/Info.plist"
+    [[ -f "$plist" ]] || plist="$dext/Info.plist"
+    bundle_id="$(plist_value CFBundleIdentifier "$plist")"
+    [[ -n "$bundle_id" ]] || continue
+    team_id="$(codesign_team_id "$dext")"
+    append_system_extension "${team_id:--}" "$bundle_id" "$dext"
+  done < <(find "$install_path" -type d -name '*.dext' -print 2>/dev/null)
+
+  return 0
+}
+
+path_is_protected() {
+  case "${1%/}" in
+    ""|/|/Applications|/Library|/System|/Users|"$HOME"|"$HOME/Applications"|"$HOME/Library")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+path_needs_root() {
+  case "$1" in
+    /Applications/*|/Library/*|/Users/Shared/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+identifier_matches() {
+  local value
+  local bundle_id
+  local prefix
+
+  value="$(lowercase "$1")"
+
+  for bundle_id in "${APP_BUNDLE_IDS[@]:-}"; do
+    bundle_id="$(lowercase "$bundle_id")"
+    if [[ "$value" == "$bundle_id" || "$value" == "$bundle_id".* || "$value" == "$bundle_id"-* ]]; then
+      return 0
+    fi
+  done
+
+  for prefix in "${IDENTIFIER_PREFIXES[@]:-}"; do
+    if [[ "$value" == "$prefix" || "$value" == "$prefix".* || "$value" == "$prefix"-* ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+append_artifact_path() {
+  local candidate="$1"
+  local existing
+  local kept=("$candidate")
+
+  [[ -e "$candidate" || -L "$candidate" ]] || return 0
+  path_is_protected "$candidate" && return 0
+
+  for existing in "${ARTIFACT_PATHS[@]:-}"; do
+    [[ -n "$existing" ]] || continue
+    if [[ "$candidate" == "$existing" || "$candidate" == "$existing"/* ]]; then
+      return 0
+    fi
+    if [[ "$existing" != "$candidate"/* ]]; then
+      kept+=("$existing")
+    fi
+  done
+
+  ARTIFACT_PATHS=("${kept[@]}")
+}
+
+append_match_pattern() {
+  local pattern="${1:-}"
+  [[ -n "$pattern" ]] || return 0
+  array_contains "$pattern" "${MATCH_PATTERNS[@]:-}" || MATCH_PATTERNS+=("$pattern")
+}
+
+append_identity_norm() {
+  local value="${1:-}"
+  [[ -n "$value" ]] || return 0
+  array_contains "$value" "${IDENTITY_NORMS[@]:-}" || IDENTITY_NORMS+=("$value")
+}
+
+build_artifact_patterns() {
+  local bundle_id
+  local prefix
+  local clean_name
+  local clean_norm
+
+  MATCH_PATTERNS=()
+  IDENTITY_NORMS=()
+  for bundle_id in "${APP_BUNDLE_IDS[@]:-}"; do
+    [[ -n "$bundle_id" ]] || continue
+    append_match_pattern "$bundle_id"
+    append_match_pattern "$bundle_id.*"
+    append_match_pattern "$bundle_id-*"
+  done
+  for prefix in "${IDENTIFIER_PREFIXES[@]:-}"; do
+    [[ -n "$prefix" ]] || continue
+    append_match_pattern "$prefix"
+    append_match_pattern "$prefix.*"
+    append_match_pattern "$prefix-*"
+  done
+  for clean_name in "${IDENTITY_NAMES[@]:-}"; do
+    clean_norm="$(normalize_name "$clean_name")"
+    (( ${#clean_norm} >= 4 )) || continue
+    append_identity_norm "$clean_norm"
+    append_match_pattern "$clean_name"
+    append_match_pattern "$clean_name *"
+    append_match_pattern "$clean_name.*"
+    append_match_pattern "${clean_name}_*"
+  done
+}
+
+collect_tail_identity_matches_from_root() {
+  local root="$1"
+  local max_depth="$2"
+  local joined=""
+  local separator=""
+  local identity_norm
+  local candidate
+
+  [[ -d "$root" ]] || return 0
+  for identity_norm in "${IDENTITY_NORMS[@]:-}"; do
+    [[ -n "$identity_norm" ]] || continue
+    joined+="${separator}${identity_norm}"
+    separator=$'\034'
+  done
+  [[ -n "$joined" ]] || return 0
+
+  while IFS= read -r candidate; do
+    append_artifact_path "$candidate"
+  done < <(
+    find "$root" -mindepth 1 -maxdepth "$max_depth" -print 2>/dev/null \
+      | awk -v root="$root/" -v identities="$joined" '
+          BEGIN { identity_count = split(identities, identity, "\034") }
+          function normalize(value) {
+            value = tolower(value)
+            gsub(/[ ._-]/, "", value)
+            return value
+          }
+          {
+            relative = substr($0, length(root) + 1)
+            component_count = split(relative, component, "/")
+            tail = ""
+            checked = 0
+            for (i = component_count; i >= 1 && checked < 3; i--) {
+              tail = component[i] tail
+              normalized_tail = normalize(tail)
+              for (j = 1; j <= identity_count; j++) {
+                if (normalized_tail == identity[j]) {
+                  print $0
+                  next
+                }
+              }
+              checked++
+            }
+          }
+        '
+  )
+
+  return 0
+}
+
+collect_artifacts_from_root() {
+  local root="$1"
+  local max_depth="$2"
+  local candidate
+  local pattern
+  local find_args=()
+  local first=true
+
+  [[ -d "$root" ]] || return 0
+
+  find_args=("$root" -mindepth 1 -maxdepth "$max_depth" \()
+  for pattern in "${MATCH_PATTERNS[@]:-}"; do
+    [[ -n "$pattern" ]] || continue
+    if $first; then
+      first=false
+    else
+      find_args+=(-o)
+    fi
+    find_args+=(-iname "$pattern")
+  done
+  $first && return 0
+  find_args+=(\) -print)
+
+  while IFS= read -r candidate; do
+    append_artifact_path "$candidate"
+  done < <(find "${find_args[@]}" 2>/dev/null)
+
+  return 0
+}
+
+collect_download_installers() {
+  local candidate
+  local file_name
+  local file_stem
+  local stem_norm
+  local clean_name
+  local clean_norm
+
+  $FERMENT || return 0
+  [[ -d "$HOME/Downloads" ]] || return 0
+
+  while IFS= read -r candidate; do
+    file_name="$(basename "$candidate")"
+    file_stem="${file_name%.*}"
+    stem_norm="$(normalize_name "$file_stem")"
+    for clean_name in "${IDENTITY_NAMES[@]:-}"; do
+      clean_norm="$(normalize_name "$clean_name")"
+      (( ${#clean_norm} >= 4 )) || continue
+      if [[ "$stem_norm" == *"$clean_norm"* ]]; then
+        append_artifact_path "$candidate"
+        break
+      fi
+    done
+  done < <(
+    find "$HOME/Downloads" -maxdepth 2 -type f \
+      \( -iname '*.dmg' -o -iname '*.pkg' -o -iname '*.zip' \) \
+      -print 2>/dev/null
+  )
+
+  return 0
+}
+
+collect_leftover_artifacts() {
+  ARTIFACT_PATHS=()
+  build_artifact_patterns
+
+  collect_artifacts_from_root "$HOME/Library" 1
+  collect_artifacts_from_root "$HOME/Library/Application Support" 2
+  collect_tail_identity_matches_from_root "$HOME/Library/Application Support" 2
+  collect_artifacts_from_root "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments" 1
+  collect_artifacts_from_root "$HOME/Library/Caches" 2
+  collect_tail_identity_matches_from_root "$HOME/Library/Caches" 2
+  collect_artifacts_from_root "$HOME/Library/Preferences" 2
+  collect_artifacts_from_root "$HOME/Library/Logs" 2
+  collect_tail_identity_matches_from_root "$HOME/Library/Logs" 2
+  collect_artifacts_from_root "$HOME/Library/Saved Application State" 1
+  collect_artifacts_from_root "$HOME/Library/WebKit" 2
+  collect_artifacts_from_root "$HOME/Library/Containers" 1
+  collect_artifacts_from_root "$HOME/Library/Group Containers" 1
+  collect_artifacts_from_root "$HOME/Library/Application Scripts" 1
+  collect_artifacts_from_root "$HOME/Library/HTTPStorages" 1
+  collect_artifacts_from_root "$HOME/Library/Cookies" 1
+  collect_artifacts_from_root "$HOME/Library/LaunchAgents" 1
+  collect_artifacts_from_root "$HOME/Library/LaunchDaemons" 1
+
+  collect_artifacts_from_root /Library 1
+  collect_artifacts_from_root "/Library/Application Support" 2
+  collect_tail_identity_matches_from_root "/Library/Application Support" 2
+  collect_artifacts_from_root /Library/Caches 2
+  collect_tail_identity_matches_from_root /Library/Caches 2
+  collect_artifacts_from_root /Library/Preferences 2
+  collect_artifacts_from_root /Library/Logs 2
+  collect_tail_identity_matches_from_root /Library/Logs 2
+  collect_artifacts_from_root /Library/LaunchAgents 1
+  collect_artifacts_from_root /Library/LaunchDaemons 1
+  collect_artifacts_from_root /Library/PrivilegedHelperTools 2
+  collect_artifacts_from_root /Library/Frameworks 2
+  collect_artifacts_from_root /Library/Extensions 2
+  collect_artifacts_from_root "/Library/Audio/Plug-Ins" 4
+  collect_artifacts_from_root "/Library/Internet Plug-Ins" 2
+  collect_artifacts_from_root /Users/Shared 2
+
+  collect_download_installers
+}
+
+collect_identifier_hints_and_receipts() {
+  local identifier
+  local receipt
+  local hint_path
+  local hint_name
+
+  for identifier in "${IDENTIFIER_INPUTS[@]:-}"; do
+    append_identifier_prefix "$identifier"
+    if [[ "$(lowercase "$identifier")" == com.* ]]; then
+      append_identifier_prefix "group.${identifier#*.}"
+    fi
+  done
+
+  for identifier in "${APP_BUNDLE_IDS[@]:-}"; do
+    if [[ "$(lowercase "$identifier")" == com.* ]]; then
+      append_identifier_prefix "group.${identifier#*.}"
+    fi
+    derive_identity_from_identifier "$identifier" || true
+  done
+
+  if (( ${#IDENTIFIER_PREFIXES[@]} == 0 && ${#APP_BUNDLE_IDS[@]} == 0 )); then
+    while IFS= read -r receipt; do
+      [[ -n "$receipt" ]] || continue
+      if derive_identity_from_identifier "$receipt"; then
+        append_package_receipt "$receipt"
+      fi
+    done < <(pkgutil --pkgs 2>/dev/null || true)
+
+    while IFS= read -r hint_path; do
+      hint_name="$(basename "$hint_path")"
+      hint_name="${hint_name%.plist}"
+      derive_identity_from_identifier "$hint_name" || true
+    done < <(
+      find "$HOME/Library/LaunchAgents" "$HOME/Library/Preferences" \
+        /Library/LaunchAgents /Library/LaunchDaemons /Library/Preferences \
+        -maxdepth 2 -type f -name '*.plist' -print 2>/dev/null
+    )
+  fi
+
+  while IFS= read -r receipt; do
+    [[ -n "$receipt" ]] || continue
+    identifier_matches "$receipt" && append_package_receipt "$receipt"
+  done < <(pkgutil --pkgs 2>/dev/null || true)
+
+  return 0
+}
+
+collect_installed_system_extensions() {
+  local dext
+  local plist
+  local bundle_id
+  local team_id
+
+  [[ -d /Library/SystemExtensions ]] || return 0
+  while IFS= read -r dext; do
+    plist="$dext/Contents/Info.plist"
+    [[ -f "$plist" ]] || plist="$dext/Info.plist"
+    bundle_id="$(plist_value CFBundleIdentifier "$plist")"
+    [[ -n "$bundle_id" ]] || continue
+    identifier_matches "$bundle_id" || continue
+    team_id="$(codesign_team_id "$dext")"
+    append_system_extension "${team_id:--}" "$bundle_id" "$dext"
+  done < <(find /Library/SystemExtensions -maxdepth 3 -type d -name '*.dext' -print 2>/dev/null)
+
+  return 0
+}
+
+collect_launch_item_metadata() {
+  local path
+  local program
+
+  for path in "${ARTIFACT_PATHS[@]:-}"; do
+    case "$path" in
+      */LaunchAgents/*.plist|*/LaunchDaemons/*.plist)
+        program="$(plist_value Program "$path")"
+        if [[ -z "$program" ]]; then
+          program="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$path" 2>/dev/null || true)"
+        fi
+        [[ -n "$program" ]] || continue
+        append_process_path "$program"
+        append_executable "$(basename "$program")"
+        ;;
+    esac
+  done
+}
+
+unload_launch_items() {
+  local path
+  local uid
+  uid="$(id -u)"
+
+  log_section "🧯 Unloading matching launch jobs..."
+  for path in "${ARTIFACT_PATHS[@]:-}"; do
+    case "$path" in
+      /Library/LaunchDaemons/*.plist)
+        run_as_root launchctl bootout system "$path" >/dev/null 2>&1 || true
+        log_detail "booted out: $path"
+        ;;
+      /Library/LaunchAgents/*.plist|"$HOME"/Library/LaunchAgents/*.plist|"$HOME"/Library/LaunchDaemons/*.plist)
+        launchctl bootout "gui/$uid" "$path" >/dev/null 2>&1 || true
+        log_detail "booted out: $path"
+        ;;
+    esac
+  done
+}
+
+escape_ere() {
+  printf '%s\n' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'
+}
+
+kill_exact_process() {
+  local signal_opt="$1"
+  local executable="$2"
+  local executable_pattern
+  [[ -n "$executable" ]] || return 0
+  executable_pattern="$(escape_ere "$executable")"
+
+  if [[ -n "$signal_opt" ]]; then
+    run_as_root pkill "$signal_opt" -x "$executable_pattern" 2>/dev/null || true
+  else
+    run_as_root pkill -x "$executable_pattern" 2>/dev/null || true
+  fi
+}
+
+kill_path_process() {
+  local signal_opt="$1"
+  local install_path="$2"
+  local pid
+  local install_pattern
+  [[ -n "$install_path" ]] || return 0
+  install_pattern="$(escape_ere "$install_path")"
+
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" == "$$" || "$pid" == "$PPID" ]] && continue
+    if [[ -n "$signal_opt" ]]; then
+      run_as_root kill "$signal_opt" "$pid" 2>/dev/null || true
+    else
+      run_as_root kill "$pid" 2>/dev/null || true
+    fi
+  done < <(pgrep -f "$install_pattern" 2>/dev/null || true)
+}
+
+has_live_process() {
+  local executable
+  local install_path
+  local matching_pid
+  local executable_pattern
+  local install_pattern
+
+  for executable in "${APP_EXECUTABLES[@]:-}"; do
+    [[ -n "$executable" ]] || continue
+    executable_pattern="$(escape_ere "$executable")"
+    pgrep -x "$executable_pattern" >/dev/null 2>&1 && return 0
+  done
+  for install_path in "${PROCESS_PATHS[@]:-}"; do
+    [[ -n "$install_path" ]] || continue
+    install_pattern="$(escape_ere "$install_path")"
+    while IFS= read -r matching_pid; do
+      [[ "$matching_pid" =~ ^[0-9]+$ ]] || continue
+      [[ "$matching_pid" == "$$" || "$matching_pid" == "$PPID" ]] && continue
+      return 0
+    done < <(pgrep -f "$install_pattern" 2>/dev/null || true)
+  done
+  return 1
+}
+
+kill_target_processes() {
+  local executable
+  local install_path
+
+  log_section "🔪 Killing identity-matched processes..."
+  for executable in "${APP_EXECUTABLES[@]:-}"; do
+    kill_exact_process "" "$executable"
+  done
+  for install_path in "${PROCESS_PATHS[@]:-}"; do
+    kill_path_process "" "$install_path"
+  done
+
+  sleep 1
+  if has_live_process; then
+    log_line "💥 helpers tried to respawn; applying the sab-50 clause."
+    for executable in "${APP_EXECUTABLES[@]:-}"; do
+      kill_exact_process -9 "$executable"
+    done
+    for install_path in "${PROCESS_PATHS[@]:-}"; do
+      kill_path_process -9 "$install_path"
+    done
+  fi
+}
+
+uninstall_system_extensions() {
+  local record
+  local team_id
+  local bundle_id
+  local bundle_path
+
+  (( ${#SYSTEM_EXTENSIONS[@]} > 0 )) || return 0
+  log_section "🧬 Asking macOS to uninstall managed system extensions..."
+
+  for record in "${SYSTEM_EXTENSIONS[@]}"; do
+    IFS='|' read -r team_id bundle_id bundle_path <<< "$record"
+    log_detail "$team_id $bundle_id"
+    if ! run_as_root systemextensionsctl uninstall "$team_id" "$bundle_id"; then
+      log_detail "macOS did not remove $bundle_id; approval or a restart may still be required."
+      ((CLEANUP_WARNINGS += 1))
+    fi
+  done
+
+  run_as_root systemextensionsctl gc >/dev/null 2>&1 || true
+}
+
+remove_path() {
+  local path="$1"
+
+  [[ -e "$path" || -L "$path" ]] || return 0
+  if path_is_protected "$path"; then
+    log_detail "REFUSED protected path: $path"
+    ((CLEANUP_FAILURES += 1))
+    return 1
+  fi
+
+  log_detail "removing: $path"
+  if path_needs_root "$path"; then
+    run_as_root rm -rf "$path"
+  else
+    rm -rf "$path"
+  fi
+
+  if [[ -e "$path" || -L "$path" ]]; then
+    log_detail "FAILED to remove: $path"
+    ((CLEANUP_FAILURES += 1))
+    return 1
+  fi
+}
+
+forget_package_receipts() {
+  local receipt
+
+  (( ${#PACKAGE_RECEIPTS[@]} > 0 )) || return 0
+  log_section "🧾 Forgetting matching installer receipts..."
+  for receipt in "${PACKAGE_RECEIPTS[@]}"; do
+    log_detail "$receipt"
+    if ! run_as_root pkgutil --forget "$receipt" >/dev/null; then
+      log_detail "FAILED to forget receipt: $receipt"
+      ((CLEANUP_FAILURES += 1))
+    fi
+  done
+}
+
+parse_args() {
+  local positional=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--fermentaboutit)
+        FERMENT=true
+        shift
+        ;;
+      -s|--silent)
+        SILENT=true
+        shift
+        ;;
+      -n|--dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+      -l|--leftovers-only)
+        LEFTOVERS_ONLY=true
+        shift
+        ;;
+      -i|--identifier)
+        shift
+        [[ $# -gt 0 ]] || die "The --identifier potion needs a bundle-ID or package-ID prefix."
+        IDENTIFIER_INPUTS+=("$1")
+        shift
+        ;;
+      -p|--path)
+        TARGET_KIND="path"
+        shift
+        [[ $# -gt 0 ]] || die "The --path potion needs an actual path."
+        TARGET_INPUT="$1"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          positional+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        die "Unknown flag: $1. Try -h for the full spellbook."
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -n "$TARGET_INPUT" && ${#positional[@]} -gt 0 ]]; then
+    die "Choose one target style: app name or --path. Mixing both is chaos magic."
+  fi
+
+  if $LEFTOVERS_ONLY && [[ "$TARGET_KIND" == "path" ]]; then
+    die "--leftovers-only takes an app name, not --path."
+  fi
+
+  if [[ -z "$TARGET_INPUT" ]]; then
+    [[ ${#positional[@]} -gt 0 ]] || {
+      usage
+      exit 1
+    }
+    TARGET_INPUT="${positional[*]}"
+  fi
+}
+
+parse_args "$@"
+
+if $SILENT; then
+  exec >/dev/null
+fi
+
+APP_PATH=""
+APP_NAME=""
+INSTALL_PATHS=()
+APP_BUNDLE_IDS=()
+APP_EXECUTABLES=()
+PROCESS_PATHS=()
+CLEAN_NAMES=()
+IDENTITY_NAMES=()
+IDENTIFIER_PREFIXES=()
+PACKAGE_RECEIPTS=()
+SYSTEM_EXTENSIONS=()
+ARTIFACT_PATHS=()
+MATCH_PATTERNS=()
+IDENTITY_NORMS=()
+CLEANUP_FAILURES=0
+CLEANUP_WARNINGS=0
+
+if ! $LEFTOVERS_ONLY && [[ "$TARGET_KIND" == "name" ]]; then
+  EXPANDED_TARGET_INPUT="$(expand_path "$TARGET_INPUT")"
+  if [[ "$TARGET_INPUT" == */* || "$TARGET_INPUT" == "~" || "$TARGET_INPUT" == \~/* ]]; then
+    if [[ -e "$EXPANDED_TARGET_INPUT" ]]; then
+      TARGET_KIND="path"
+      TARGET_INPUT="$EXPANDED_TARGET_INPUT"
+    fi
+  fi
+fi
+
+if ! $LEFTOVERS_ONLY && [[ "$TARGET_KIND" == "name" && "$TARGET_INPUT" == *.app && "$TARGET_INPUT" == */* ]]; then
+  TARGET_KIND="path"
+fi
+
+if $LEFTOVERS_ONLY; then
+  APP_PATH="$(trim_whitespace "$TARGET_INPUT")"
+elif [[ "$TARGET_KIND" == "path" ]]; then
+  APP_PATH="$(expand_path "$TARGET_INPUT")"
+  [[ -d "$APP_PATH" ]] || die "That path does not exist: $APP_PATH"
+  path_is_protected "$APP_PATH" && die "Refusing to target protected path: $APP_PATH"
+  INSTALL_PATHS=("$APP_PATH")
+else
+  while IFS= read -r install_path; do
+    INSTALL_PATHS+=("$install_path")
+  done < <(collect_install_targets "$TARGET_INPUT") \
+    || true
+
+  if [[ ${#INSTALL_PATHS[@]} -gt 0 ]]; then
+    APP_PATH="${INSTALL_PATHS[0]}"
+  else
+    APP_PATH="$(trim_whitespace "$TARGET_INPUT")"
+    APP_PATH="${APP_PATH%/}"
+    APP_PATH="${APP_PATH%.app}"
+  fi
+fi
+
+APP_PATH="${APP_PATH%/}"
+APP_NAME="$(basename "$APP_PATH")"
+APP_NAME="${APP_NAME%.app}"
+BREW_QUERY="$(slugify_for_brew "$APP_NAME")"
+append_clean_name "$APP_NAME"
+append_identity_name "$APP_NAME"
+
+if [[ "$TARGET_KIND" == "name" && "$TARGET_INPUT" != "$APP_NAME" ]]; then
+  append_clean_name "$TARGET_INPUT"
+  append_identity_name "$TARGET_INPUT"
+fi
+append_executable "$APP_NAME"
+
+if (( ${#INSTALL_PATHS[@]} > 0 )); then
+  for install_path in "${INSTALL_PATHS[@]}"; do
+    append_process_path "$install_path"
+    collect_bundle_metadata "$install_path"
+  done
+fi
+
+collect_identifier_hints_and_receipts
+collect_installed_system_extensions
+collect_leftover_artifacts
+collect_launch_item_metadata
+
+log_section "💀 getrektnerd invoked on: $APP_NAME"
+if $LEFTOVERS_ONLY; then
+  log_detail "🎯 Leftovers-only hunt; no application bundle will be removed."
+elif [[ ${#INSTALL_PATHS[@]} -eq 1 ]]; then
+  log_detail "🎯 Resolved target: $APP_PATH"
+elif [[ ${#INSTALL_PATHS[@]} -gt 1 ]]; then
+  log_line "🎯 Resolved targets:"
+  for install_path in "${INSTALL_PATHS[@]}"; do
+    log_detail "- $install_path"
+  done
+else
+  log_detail "🎯 No install bundle resolved. Running cleanup from the app name."
+fi
+$FERMENT && log_detail "🍺 FERMENTABOUTIT INVOKED - bludgeon n brewskis? LFG!"
+
+if (( ${#APP_BUNDLE_IDS[@]} > 0 )); then
+  log_line "🪪 Bundle identities:"
+  for bundle_id in "${APP_BUNDLE_IDS[@]}"; do
+    log_detail "$bundle_id"
+  done
+fi
+
+if (( ${#IDENTIFIER_PREFIXES[@]} > 0 )); then
+  log_line "🧬 Identity prefixes:"
+  for identifier in "${IDENTIFIER_PREFIXES[@]}"; do
+    log_detail "$identifier"
+  done
+fi
+
+if $DRY_RUN; then
+  log_section "🔎 Dry-run purge manifest (nothing below was changed)"
+  for install_path in "${INSTALL_PATHS[@]:-}"; do
+    [[ -n "$install_path" ]] && log_detail "install target: $install_path"
+  done
+  for executable in "${APP_EXECUTABLES[@]:-}"; do
+    [[ -n "$executable" ]] && log_detail "process executable: $executable"
+  done
+  for process_path in "${PROCESS_PATHS[@]:-}"; do
+    [[ -n "$process_path" ]] && log_detail "process path: $process_path"
+  done
+  for artifact_path in "${ARTIFACT_PATHS[@]:-}"; do
+    [[ -n "$artifact_path" ]] && log_detail "artifact: $artifact_path"
+  done
+  for receipt in "${PACKAGE_RECEIPTS[@]:-}"; do
+    [[ -n "$receipt" ]] && log_detail "package receipt: $receipt"
+  done
+  for extension_record in "${SYSTEM_EXTENSIONS[@]:-}"; do
+    [[ -n "$extension_record" ]] && log_detail "managed extension: ${extension_record//|/  }"
+  done
+  $FERMENT && log_detail "Homebrew: would search for exact cask/formula token '$BREW_QUERY'"
+
+  if (( ${#INSTALL_PATHS[@]} == 0 \
+    && ${#ARTIFACT_PATHS[@]} == 0 \
+    && ${#PACKAGE_RECEIPTS[@]} == 0 \
+    && ${#SYSTEM_EXTENSIONS[@]} == 0 )); then
+    log_detail "No identity-matched targets found."
+  fi
+
+  log_section "🪞 Dry run complete. Nobody got rekt."
+  exit 0
+fi
+
+prewarm_root_auth
+unload_launch_items
+kill_target_processes
+uninstall_system_extensions
+
+if (( ${#INSTALL_PATHS[@]} > 0 )); then
+  log_section "🗡️ Removing install targets (camping the spawn)..."
+  for install_path in "${INSTALL_PATHS[@]}"; do
+    remove_path "$install_path" || true
+  done
+fi
+
+if (( ${#ARTIFACT_PATHS[@]} > 0 )); then
+  log_section "🥢 Removing identity-matched leftovers..."
+  for artifact_path in "${ARTIFACT_PATHS[@]}"; do
+    remove_path "$artifact_path" || true
+  done
+else
+  log_section "🥢 No identity-matched leftovers found."
+fi
+
+forget_package_receipts
+
+log_section "🧼 Refreshing LaunchServices + icon cache..."
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -r -domain local -domain system -domain user \
+  || {
+    log_detail "LaunchServices refresh was skipped by this macOS version."
+    ((CLEANUP_WARNINGS += 1))
+  }
+killall Dock Finder 2>/dev/null || true
+
+log_section "🧪 Verifying the wipe..."
+for install_path in "${INSTALL_PATHS[@]:-}"; do
+  if [[ -e "$install_path" || -L "$install_path" ]]; then
+    log_detail "STILL PRESENT: $install_path"
+    ((CLEANUP_FAILURES += 1))
+  fi
+done
+
+collect_leftover_artifacts
+if (( ${#ARTIFACT_PATHS[@]} > 0 )); then
+  for artifact_path in "${ARTIFACT_PATHS[@]}"; do
+    log_detail "STILL PRESENT: $artifact_path"
+    ((CLEANUP_FAILURES += 1))
+  done
+fi
+
+for receipt in "${PACKAGE_RECEIPTS[@]:-}"; do
+  if pkgutil --pkg-info "$receipt" >/dev/null 2>&1; then
+    log_detail "RECEIPT STILL PRESENT: $receipt"
+    ((CLEANUP_FAILURES += 1))
+  fi
+done
+
+for extension_record in "${SYSTEM_EXTENSIONS[@]:-}"; do
+  IFS='|' read -r _ extension_id extension_path <<< "$extension_record"
+  if [[ -e "$extension_path" ]]; then
+    log_detail "SYSTEM EXTENSION STILL PRESENT (macOS may require approval/restart): $extension_id"
+    ((CLEANUP_WARNINGS += 1))
+  fi
+done
+
+if (( CLEANUP_FAILURES > 0 )); then
+  log_section "🧟 Nuke incomplete: $CLEANUP_FAILURES artifact(s) survived."
+  die "Refusing to call that complete. Review the STILL PRESENT lines above."
+fi
+
+if $FERMENT; then
+  command -v brew >/dev/null 2>&1 || die "Homebrew is not installed, so fermentation cannot happen."
+  log_section "Searching for brewskis using the exact token: $BREW_QUERY"
+
+  BREW_CASK="$(brew search --casks "$BREW_QUERY" 2>/dev/null \
+    | awk -v query="$BREW_QUERY" 'tolower($0) == tolower(query) { print; exit }')"
+  BREW_FORMULA="$(brew search "$BREW_QUERY" 2>/dev/null \
+    | awk -v query="$BREW_QUERY" 'tolower($0) == tolower(query) { print; exit }')"
+
+  if [[ -n "$BREW_CASK" ]]; then
+    log_detail "🍻 Found exact cask: $BREW_CASK"
+    if brew list --cask "$BREW_CASK" >/dev/null 2>&1; then
+      brew reinstall --cask "$BREW_CASK"
+    else
+      brew install --cask "$BREW_CASK"
+    fi
+  elif [[ -n "$BREW_FORMULA" ]]; then
+    log_detail "🍻 Found exact formula: $BREW_FORMULA"
+    if brew list --formula "$BREW_FORMULA" >/dev/null 2>&1; then
+      brew reinstall "$BREW_FORMULA"
+    else
+      brew install "$BREW_FORMULA"
+    fi
+  else
+    die "No exact Homebrew cask or formula matched '$BREW_QUERY'; refusing to install a fuzzy lookalike. Try: brew search '$BREW_QUERY'"
+  fi
+
+  log_section "🥂 Fermentation complete."
+fi
+
+if (( CLEANUP_WARNINGS > 0 )); then
+  log_section "💣 Nuke finished with $CLEANUP_WARNINGS macOS-managed warning(s)."
+  log_detail "The filesystem sweep passed; check the messages above for approval/restart work."
+else
+  log_section "💣 Nuke complete — verified clean."
+fi
+
+spacer
+log_line "  GOT EM' ...now hit em w the 🫖 👜 for the kill cam"
+log_line "  gg"
+spacer
+log_line "  ~ xoXalcheXnvrXmissedXox"
+spacer

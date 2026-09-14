@@ -1,0 +1,266 @@
+#!/bin/zsh
+
+# Toggle only the MacBook's built-in keyboard by applying a device-specific
+# UserKeyMapping through Apple's built-in hidutil. External keyboards, the
+# trackpad, and the separate Touch ID sensor are not targeted.
+
+set -u
+umask 077
+
+readonly HIDUTIL="/usr/bin/hidutil"
+readonly MATCH='{"Product":"Apple Internal Keyboard / Trackpad","Transport":"FIFO","PrimaryUsagePage":1,"PrimaryUsage":6}'
+readonly NULL_USAGE=30064771072 # 0x0000000700000000: keyboard-page "no event"
+readonly PROGRAM_NAME="${0:t}"
+readonly STATE_DIR="${TMPDIR:-/tmp/}macbook-keyboard-lock-${UID}"
+readonly MARKER_FILE="${STATE_DIR}/active"
+readonly PID_FILE="${STATE_DIR}/watcher.pid"
+readonly PREVIOUS_MAPPING_FILE="${STATE_DIR}/previous-mapping.json"
+
+usage() {
+  print "Usage: ${PROGRAM_NAME} [toggle|on|off|status|preview]"
+  print "  on   Enable the built-in keyboard"
+  print "  off  Disable the built-in keyboard (external keyboard required)"
+}
+
+current_mapping() {
+  "$HIDUTIL" property --matching "$MATCH" --get UserKeyMapping 2>/dev/null || true
+}
+
+mapping_entry_count() {
+  current_mapping | awk '
+    index($0, "HIDKeyboardModifierMappingSrc") { count++ }
+    END { print count + 0 }
+  '
+}
+
+is_our_mapping_active() {
+  # The lock contains 245 entries. Counting entries instead of matching one
+  # exact number format works whether this macOS release prints decimal or hex.
+  (( $(mapping_entry_count) > 100 ))
+}
+
+current_mapping_as_json() {
+  # Convert hidutil's printed property-list form back into the JSON-style
+  # dictionary accepted by `hidutil property --set`.
+  current_mapping | tr '{},;' '\n' | awk '
+    function value_after_separator(line, value) {
+      value = line
+      sub(/^.*[=:][[:space:]]*/, "", value)
+      gsub(/[[:space:]]/, "", value)
+      return value
+    }
+    BEGIN { printf "{\"UserKeyMapping\":[" }
+    index($0, "HIDKeyboardModifierMappingSrc") {
+      src = value_after_separator($0)
+    }
+    index($0, "HIDKeyboardModifierMappingDst") {
+      dst = value_after_separator($0)
+    }
+    src != "" && dst != "" {
+      printf "%s{\"HIDKeyboardModifierMappingSrc\":%s,\"HIDKeyboardModifierMappingDst\":%s}", separator, src, dst
+      separator = ","
+      src = ""
+      dst = ""
+    }
+    END { print "]}" }
+  '
+}
+
+json_mapping_entry_count() {
+  awk -F'HIDKeyboardModifierMappingSrc' '{ count += NF - 1 } END { print count + 0 }'
+}
+
+save_previous_mapping() {
+  local existing_count backup parsed_count
+  existing_count="$(mapping_entry_count)"
+
+  mkdir -p "$STATE_DIR"
+  rm -f "$PREVIOUS_MAPPING_FILE"
+
+  (( existing_count == 0 )) && return 0
+
+  backup="$(current_mapping_as_json)"
+  parsed_count="$(print -rn -- "$backup" | json_mapping_entry_count)"
+  if (( parsed_count != existing_count )); then
+    print -u2 "Could not safely preserve the existing built-in-keyboard mapping."
+    print -u2 "Nothing was changed."
+    return 1
+  fi
+
+  print -r -- "$backup" > "$PREVIOUS_MAPPING_FILE"
+}
+
+restore_previous_mapping() {
+  local mapping='{"UserKeyMapping":[]}'
+  [[ -s "$PREVIOUS_MAPPING_FILE" ]] && mapping="$(<"$PREVIOUS_MAPPING_FILE")"
+  apply_mapping "$mapping"
+}
+
+clear_state() {
+  rm -f "$MARKER_FILE" "$PID_FILE" "$PREVIOUS_MAPPING_FILE"
+}
+
+external_keyboard_present() {
+  "$HIDUTIL" list 2>/dev/null | awk '
+    NR > 2 && $4 == "1" && $5 == "6" && $NF == "0" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+build_disabled_mapping() {
+  typeset -a sources
+  local usage source json separator
+
+  # Every ordinary key and modifier in the USB HID keyboard/keypad page.
+  for usage in {4..231}; do
+    sources+=( $(( (7 << 32) | usage )) )
+  done
+
+  # Globe/Fn, the MacBook function-row outputs, and media-key usages exposed
+  # by this generation of Apple internal keyboard.
+  sources+=(
+    $(( 0x000000ff00000003 )) # Globe/Fn
+    $(( 0x000000ff00000004 )) # display brightness up
+    $(( 0x000000ff00000005 )) # display brightness down
+    $(( 0x0000ff0100000010 )) # Mission Control
+    $(( 0x0000ff010000000b )) # Apple vendor key
+    $(( 0x0000000c00000221 )) # Spotlight
+    $(( 0x0000000c000000cf )) # Dictation
+    $(( 0x000000010000009b )) # Do Not Disturb
+    $(( 0x0000000c000000b3 )) # next track
+    $(( 0x0000000c000000b4 )) # previous track
+    $(( 0x0000000c000000b5 )) # scan next track
+    $(( 0x0000000c000000b6 )) # scan previous track
+    $(( 0x0000000c000000b8 )) # eject
+    $(( 0x0000000c000000cd )) # play/pause
+    $(( 0x0000000c000000e2 )) # mute
+    $(( 0x0000000c000000e9 )) # volume up
+    $(( 0x0000000c000000ea )) # volume down
+  )
+
+  json='{"UserKeyMapping":['
+  separator=""
+  for source in "${sources[@]}"; do
+    json+="${separator}{\"HIDKeyboardModifierMappingSrc\":${source},\"HIDKeyboardModifierMappingDst\":${NULL_USAGE}}"
+    separator=","
+  done
+  json+=']}'
+  print -r -- "$json"
+}
+
+apply_mapping() {
+  local mapping="$1"
+  "$HIDUTIL" property --matching "$MATCH" --set "$mapping"
+}
+
+disable_keyboard() {
+  local mapping
+
+  if is_our_mapping_active; then
+    print "MacBook keyboard is already disabled."
+    return 0
+  fi
+
+  if ! external_keyboard_present; then
+    print -u2 "Refusing to disable: no external keyboard is currently visible."
+    print -u2 "Connect the external keyboard and try again."
+    return 2
+  fi
+
+  if ! save_previous_mapping; then
+    return 3
+  fi
+
+  mapping="$(build_disabled_mapping)"
+  if ! apply_mapping "$mapping"; then
+    restore_previous_mapping >/dev/null 2>&1 || true
+    clear_state
+    print -u2 "macOS rejected the mapping."
+    print -u2 "Allow Terminal under System Settings > Privacy & Security > Input Monitoring, then retry."
+    return 4
+  fi
+
+  if ! is_our_mapping_active; then
+    restore_previous_mapping >/dev/null 2>&1 || true
+    clear_state
+    print -u2 "The mapping was not applied."
+    print -u2 "Allow Terminal under System Settings > Privacy & Security > Input Monitoring, then retry."
+    return 4
+  fi
+
+  : > "$MARKER_FILE"
+
+  # Restore the built-in keyboard automatically if the external keyboard goes
+  # away. The watcher also exits when the mapping is manually removed.
+  ("$0" _watch >/dev/null 2>&1) &!
+  print $! > "$PID_FILE"
+
+  print "MacBook keyboard disabled. External keyboard and Touch ID remain available."
+}
+
+enable_keyboard() {
+  local count
+  count="$(mapping_entry_count)"
+
+  if (( count == 0 )); then
+    clear_state
+    print "MacBook keyboard is already enabled."
+    return 0
+  fi
+
+  if ! is_our_mapping_active; then
+    print "MacBook keyboard is enabled; ${count} custom mapping entries were left unchanged."
+    return 0
+  fi
+
+  if ! restore_previous_mapping; then
+    print -u2 "macOS did not re-enable the built-in keyboard."
+    return 4
+  fi
+
+  clear_state
+  print "MacBook keyboard enabled."
+}
+
+show_status() {
+  local count
+  count="$(mapping_entry_count)"
+  if (( count > 100 )); then
+    print "disabled (${count} built-in key mappings active)"
+  elif (( count == 0 )); then
+    print "enabled"
+  else
+    print "enabled (${count} custom mapping entries present)"
+  fi
+}
+
+watch_external_keyboard() {
+  while [[ -e "$MARKER_FILE" ]] && is_our_mapping_active; do
+    if ! external_keyboard_present; then
+      restore_previous_mapping >/dev/null 2>&1 || true
+      clear_state
+      return 0
+    fi
+    sleep 2
+  done
+
+  [[ -e "$MARKER_FILE" ]] && clear_state
+}
+
+command="${1:-toggle}"
+case "$command" in
+  toggle)
+    if is_our_mapping_active; then enable_keyboard; else disable_keyboard; fi
+    ;;
+  on) enable_keyboard ;;
+  off) disable_keyboard ;;
+  status) show_status ;;
+  preview)
+    print "Target: $MATCH"
+    print "Mappings that would be installed: $(( $(build_disabled_mapping | awk -F'HIDKeyboardModifierMappingSrc' '{ print NF - 1 }') ))"
+    print "No settings changed."
+    ;;
+  _watch) watch_external_keyboard ;;
+  -h|--help|help) usage ;;
+  *) usage; return 64 ;;
+esac

@@ -20,9 +20,6 @@ export AWS_PAGER=""
 # Browser preference
 export BROWSER="${BROWSER:-Google Chrome}"
 
-# Icon Forge
-export ICONFORGE_ICON_ROOT="${ICONFORGE_ICON_ROOT:-$HOME/Desktop/artistry/app-icons}"
-
 # ───────────────────────────────────────────────────────────────
 # 🛣️ PATH HELPERS
 # ───────────────────────────────────────────────────────────────
@@ -87,6 +84,11 @@ path_prepend "$PNPM_HOME"
 # asdf
 export ASDF_DATA_DIR="$HOME/.asdf"
 path_prepend "$ASDF_DATA_DIR/shims"
+
+# Proto
+export PROTO_HOME="${PROTO_HOME:-$HOME/.proto}"
+path_prepend "$PROTO_HOME/shims"
+path_prepend "$PROTO_HOME/bin"
 
 # Local script home. Keep this aligned with ~/.zshrc.
 export LOCAL_BIN="$HOME/bin"
