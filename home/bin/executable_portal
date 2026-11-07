@@ -1,0 +1,188 @@
+#!/bin/zsh
+# Device Portal: explicit connections, ordinary screen mirroring, no helper service.
+setopt PIPE_FAIL
+adb_bin=${PORTAL_ADB:-$HOME/.local/bin/adb}
+scrcpy_bin=${PORTAL_SCRCPY:-$HOME/.local/bin/scrcpy}
+typeset -a transports models states links ready chosen pids
+typeset -A identities
+
+help() {
+  cat <<'EOF'
+Device Portal
+  portal status             Show connected phones and setup instructions
+  portal mirror [8|10|all]   View and control phone screens; preserve camera recording
+  portal share              Open LocalSend for nearby file sharing
+  portal remote             Open your Macs in Chrome Remote Desktop
+  portal pair [HOST:PORT]    Pair using Android's Wireless debugging pairing dialog
+  portal connect [HOST:PORT] Connect using Wireless debugging's main IP and port
+  portal help | -h | --help  Show this help
+
+Mirroring does not unlock phones, open a camera, or change debugging settings.
+USB is preferred when the same phone is also connected over Wi-Fi.
+EOF
+}
+need_adb() {
+  command -v -- "$adb_bin" >/dev/null 2>&1 || {
+    print -u2 'Device Portal cannot find adb at ~/.local/bin/adb. Reinstall its phone tools.'
+    return 1
+  }
+}
+get_property() {
+  local query_pid timer_pid result
+  "$adb_bin" -s "$1" shell getprop "$2" & query_pid=$!
+  (zmodload zsh/zselect; zselect -t 400; kill -KILL "$query_pid") >/dev/null 2>&1 & timer_pid=$!
+  wait "$query_pid" 2>/dev/null; result=$?
+  kill -TERM "$timer_pid" 2>/dev/null
+  wait "$timer_pid" 2>/dev/null
+  return $result
+}
+guidance() {
+  local state
+  if (( ${#transports} == 0 )); then
+    print 'No phones connected. Use a USB data cable, then enable USB debugging on the phone:'
+    print 'Settings > About phone > tap Build number 7 times (if needed), then'
+    print 'Settings > System > Developer options > USB debugging. Approve this Mac on the phone.'
+    print 'For Wi-Fi: open Developer options > Wireless debugging, then use portal pair and portal connect.'
+  fi
+  if (( ${states[(Ie)unauthorized]} )); then
+    print 'Authorization needed: unlock the phone yourself and approve “Allow USB debugging?” for this Mac.'
+    print 'If the prompt is missing, reconnect the USB data cable. For Wi-Fi, use portal pair again.'
+  fi
+  if (( ${states[(Ie)offline]} )); then
+    print 'Offline: reconnect the USB data cable. For Wi-Fi, run portal connect IP:PORT using'
+    print 'Settings > System > Developer options > Wireless debugging > IP address & port.'
+    print 'If reconnecting fails, use portal pair with the separate pairing dialog’s IP and port.'
+  fi
+}
+discover() {
+  local output line transport state model identity link token index reported_model reported_id
+  local -a fields
+  need_adb || return 1
+  output=$("$adb_bin" devices -l) || { print -u2 'Could not ask Android for connected phones.'; return 1; }
+  for line in ${(f)output}; do
+    fields=(${=line})
+    (( ${#fields} >= 2 )) || continue
+    transport=$fields[1]; state=$fields[2]
+    [[ "$state" == (device|unauthorized|offline) ]] || continue
+    model='Android phone'; link='Wi-Fi'
+    [[ "$transport" != *:* && "$transport" != *._tcp* ]] && link='USB'
+    for token in $fields; do
+      [[ "$token" == model:* ]] && model=${${token#model:}//_/ }
+      [[ "$token" == usb:* ]] && link='USB'
+    done
+    identity=$transport
+    if [[ "$state" == device ]]; then
+      reported_model=$(get_property "$transport" ro.product.model 2>/dev/null) || reported_model=''
+      [[ -n "$reported_model" ]] && model=${reported_model//$'\r'/}
+      reported_id=$(get_property "$transport" ro.serialno 2>/dev/null) || reported_id=''
+      reported_id=${reported_id//$'\r'/}
+      [[ -n "$reported_id" && "$reported_id" != unknown ]] && identity=$reported_id
+    fi
+    index=${identities[$identity]:-0}
+    if (( index )); then
+      [[ "$link" == USB && "$links[$index]" != USB ]] || continue
+    else
+      index=$(( ${#transports} + 1 )); identities[$identity]=$index
+    fi
+    transports[$index]=$transport; models[$index]=$model
+    states[$index]=$state; links[$index]=$link
+  done
+  for index in {1..${#transports}}; do
+    [[ ${states[$index]:-} == device ]] && ready+=($index)
+  done
+  return 0
+}
+show_status() {
+  local index label
+  for index in {1..${#transports}}; do
+    [[ -n ${states[$index]:-} ]] || continue
+    label=$states[$index]; [[ "$label" == device ]] && label='ready'
+    print -r -- "$models[$index] — $links[$index], $label"
+  done
+  guidance
+}
+mirror() {
+  local choice=${1:-} index answer result=0 pid
+  [[ -z "$choice" || "$choice" == (8|10|all) ]] || { print -u2 'Choose portal mirror 8, 10, or all.'; return 2; }
+  discover || return 1
+  (( ${#ready} )) || { show_status; return 1; }
+  if [[ "$choice" == all ]]; then
+    chosen=($ready)
+  elif [[ -n "$choice" ]]; then
+    for index in $ready; do
+      [[ "$models[$index]" == *"Pixel $choice"* ]] && chosen+=($index)
+    done
+    (( ${#chosen} )) || { print -u2 "No ready Pixel $choice found."; show_status; return 1; }
+  elif (( ${#ready} == 1 )); then
+    chosen=($ready)
+  elif [[ -t 0 && -t 1 ]]; then
+    for (( index=1; index<=${#ready}; index++ )); do
+      print -r -- "$index) $models[$ready[$index]] — $links[$ready[$index]]"
+    done
+    read -r 'answer?Choose a phone number, or all: '
+    if [[ "$answer" == all ]]; then chosen=($ready)
+    elif [[ "$answer" == <-> ]] && (( answer >= 1 && answer <= ${#ready} )); then chosen=($ready[$answer])
+    else print -u2 'No valid phone selected.'; return 2; fi
+  else
+    print -u2 'More than one phone is ready. Use portal mirror 8, portal mirror 10, or portal mirror all.'
+    show_status; return 2
+  fi
+  command -v -- "$scrcpy_bin" >/dev/null 2>&1 || { print -u2 'Cannot find scrcpy at ~/.local/bin/scrcpy.'; return 1; }
+  local server_path="${scrcpy_bin:A:h}/scrcpy-server"
+  if [[ -z ${SCRCPY_SERVER_PATH:-} && -f "$server_path" ]]; then
+    export SCRCPY_SERVER_PATH="$server_path"
+  fi
+  guidance
+  trap '(( ${#pids} )) && kill -- $pids 2>/dev/null; exit 130' INT TERM
+  for index in $chosen; do
+    print -r -- "Opening $models[$index] via $links[$index]. Close its window to disconnect."
+    ADB="$adb_bin" "$scrcpy_bin" --serial "$transports[$index]" --no-audio \
+      --max-size=1280 --max-fps=30 --video-bit-rate=4M --always-on-top \
+      --window-title="$models[$index] — Device Portal" &
+    pids+=($!)
+  done
+  for pid in $pids; do wait "$pid" || result=1; done
+  return $result
+}
+wireless() {
+  local action=$1 endpoint=${2:-} port
+  need_adb || return 1
+  if [[ "$action" == pair ]]; then
+    print 'On the phone: Developer options > Wireless debugging > Pair device with pairing code.'
+    print 'Keep that dialog open. Use its IP address and port; adb will ask for the code.'
+  else
+    print 'Use IP address & port on the main Wireless debugging screen (not the pairing dialog).'
+  fi
+  if [[ -z "$endpoint" ]]; then
+    [[ -t 0 ]] || { print -u2 "Use portal $action HOST:PORT."; return 2; }
+    read -r 'endpoint?IP address and port: '
+  fi
+  [[ "$endpoint" =~ '^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\]):[0-9]+$' ]] || {
+    print -u2 'Enter an address and port such as 192.168.1.20:37123.'; return 2
+  }
+  port=${endpoint##*:}
+  (( ${#port} <= 5 && 10#$port >= 1 && 10#$port <= 65535 )) || { print -u2 'Port must be 1–65535.'; return 2; }
+  "$adb_bin" "$action" "$endpoint"
+}
+share() {
+  local app
+  for app in /Applications/LocalSend.app "$HOME/Applications/LocalSend.app"; do
+    [[ -d "$app" ]] || continue
+    /usr/bin/open "$app"
+    return $?
+  done
+  print -u2 'LocalSend is not installed in Applications. Install it to share files with nearby devices.'
+  return 1
+}
+if (( $# > 2 )) || { [[ ${1:-help} == (help|-h|--help|status|share|remote) ]] && (( $# > 1 )); }; then
+  print -u2 'Too many arguments. Run portal help for the supported commands.'; exit 2
+fi
+case ${1:-help} in
+  help|-h|--help) help ;;
+  status) discover && show_status ;;
+  mirror) mirror "${2:-}" ;;
+  pair|connect) wireless "$1" "${2:-}" ;;
+  remote) open 'https://remotedesktop.google.com/access' ;;
+  share) share ;;
+  *) print -u2 "Unknown command: $1. Run portal help."; exit 2 ;;
+esac

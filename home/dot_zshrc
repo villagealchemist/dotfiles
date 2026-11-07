@@ -203,10 +203,10 @@ with-title() {
 
   echo -ne "\033]0;${title}\007"
   "$@"
-  local exit_code=$?
+  local exitCode=$?
   echo -ne "\033]0;zsh\007"
 
-  return $exit_code
+  return $exitCode
 }
 
 run() {
@@ -396,7 +396,7 @@ vcodex() {
   local audio_file
   local prompt
 
-  require_keychain OPENAI_API_KEY OPENAI_API_KEY || return 1
+  require-keychain OPENAI_API_KEY OPENAI_API_KEY || return 1
   command -v rec >/dev/null 2>&1 || { echo "missing dependency: rec. Install sox with brew install sox"; return 1; }
 
   audio_file="$(mktemp -t codex-voice).wav"
@@ -430,28 +430,20 @@ vcodex() {
 # - Explicit `use-*` helpers export into the current shell.
 # - Wrappers inject secrets only into child processes when possible.
 
-keychain_get() {
-  local service="$1"
-  [[ -n "$service" ]] || { print -u2 "usage: keychain_get <service>"; return 1; }
+source "$HOME/.config/keychain/helpers.zsh"
 
-  security find-generic-password \
-    -a "$USER" \
-    -s "$service" \
-    -w 2>/dev/null
-}
-
-require_keychain() {
+require-keychain() {
   local var="$1"
   local service="$2"
   local value
 
   [[ -n "$var" && -n "$service" ]] || {
-    print -u2 "usage: require_keychain <ENV_VAR> <keychain-service>"
+    print -u2 "usage: require-keychain <ENV_VAR> <keychain-service>"
     return 1
   }
 
-  value="$(keychain_get "$service")" || {
-    print -u2 "missing Keychain item: $service"
+  value="$(keychain-get "$service")" || {
+    print -u2 "Keychain item missing or inaccessible: $service"
     return 1
   }
 
@@ -463,53 +455,53 @@ require_keychain() {
   export "$var=$value"
 }
 
-export_keychain_if_present() {
+export-keychain-if-present() {
   local var="$1"
   local service="$2"
   local value
 
   [[ -n "$var" && -n "$service" ]] || return 0
 
-  value="$(keychain_get "$service")" || return 0
+  value="$(keychain-get "$service" 2>/dev/null)" || return 0
   [[ -n "$value" ]] || return 0
 
   export "$var=$value"
 }
 
-export_keychain_first_present() {
+export-keychain-first-present() {
   local var="$1"
   shift
 
   local service
   for service in "$@"; do
-    export_keychain_if_present "$var" "$service"
+    export-keychain-if-present "$var" "$service"
     [[ -n "${(P)var}" ]] && return 0
   done
 
   return 0
 }
 
-keychain_env_arg_if_present() {
+keychain-env-arg-if-present() {
   local var="$1"
   local service="$2"
   local value
 
   [[ -n "$var" && -n "$service" ]] || return 0
 
-  value="$(keychain_get "$service")" || return 0
+  value="$(keychain-get "$service" 2>/dev/null)" || return 0
   [[ -n "$value" ]] || return 0
 
   print -r -- "$var=$value"
 }
 
-keychain_env_arg_first_present() {
+keychain-env-arg-first-present() {
   local var="$1"
   shift
 
   local service
   local arg
   for service in "$@"; do
-    arg="$(keychain_env_arg_if_present "$var" "$service")" || arg=""
+    arg="$(keychain-env-arg-if-present "$var" "$service")" || arg=""
     if [[ -n "$arg" ]]; then
       print -r -- "$arg"
       return 0
@@ -519,165 +511,95 @@ keychain_env_arg_first_present() {
   return 0
 }
 
-keychain_set() {
-  local service="$1"
-  local secret
-
-  [[ -n "$service" ]] || {
-    print -u2 "usage: keychain_set <service>"
-    return 1
-  }
-
-  print -n "secret for $service: "
-  read -rs secret
-  print
-
-  [[ -n "$secret" ]] || {
-    print -u2 "empty secret refused"
-    return 1
-  }
-
-  security add-generic-password \
-    -U \
-    -a "$USER" \
-    -s "$service" \
-    -w "$secret"
-}
-
-keychain_delete() {
-  local service="$1"
-
-  [[ -n "$service" ]] || {
-    print -u2 "usage: keychain_delete <service>"
-    return 1
-  }
-
-  security delete-generic-password \
-    -a "$USER" \
-    -s "$service"
-}
-
-keychain_has() {
-  local service="$1"
-
-  [[ -n "$service" ]] || {
-    print -u2 "usage: keychain_has <service>"
-    return 1
-  }
-
-  if security find-generic-password -a "$USER" -s "$service" >/dev/null 2>&1; then
-    echo "$service: present"
-  else
-    echo "$service: missing"
-    return 1
-  fi
-}
-
-keychain_audit() {
-  local services=(
-    EMAIL
-    github.com
-    OPENAI_API_KEY
-    GEMINI_API_KEY
-    GOOGLE_API_KEY
-    ANTHROPIC_API_KEY
-  )
-
-  local service
-  for service in "${services[@]}"; do
-    keychain_has "$service" || true
-  done
-}
-
 gh-token() {
-  keychain_get github.com
+  keychain-get github.com
 }
 
 use-gh-token() {
-  require_keychain GITHUB_TOKEN github.com || return 1
+  require-keychain GITHUB_TOKEN github.com || return 1
   export NPM_TOKEN="$GITHUB_TOKEN"
   export CHANGELOG_GITHUB_TOKEN="$GITHUB_TOKEN"
   echo "GITHUB_TOKEN, NPM_TOKEN, and CHANGELOG_GITHUB_TOKEN loaded."
 }
 
 use-openai() {
-  require_keychain OPENAI_API_KEY OPENAI_API_KEY
+  require-keychain OPENAI_API_KEY OPENAI_API_KEY
 }
 
 use-gemini-api() {
-  require_keychain GEMINI_API_KEY GEMINI_API_KEY
+  require-keychain GEMINI_API_KEY GEMINI_API_KEY
 }
 
 use-google-api() {
-  require_keychain GOOGLE_API_KEY GOOGLE_API_KEY
+  require-keychain GOOGLE_API_KEY GOOGLE_API_KEY
 }
 
 use-anthropic() {
-  require_keychain ANTHROPIC_API_KEY ANTHROPIC_API_KEY
+  require-keychain ANTHROPIC_API_KEY ANTHROPIC_API_KEY
 }
 
 use-ai-env() {
-  export_keychain_if_present OPENAI_API_KEY OPENAI_API_KEY
-  export_keychain_if_present GEMINI_API_KEY GEMINI_API_KEY
-  export_keychain_if_present GOOGLE_API_KEY GOOGLE_API_KEY
-  export_keychain_if_present ANTHROPIC_API_KEY ANTHROPIC_API_KEY
+  export-keychain-if-present OPENAI_API_KEY OPENAI_API_KEY
+  export-keychain-if-present GEMINI_API_KEY GEMINI_API_KEY
+  export-keychain-if-present GOOGLE_API_KEY GOOGLE_API_KEY
+  export-keychain-if-present ANTHROPIC_API_KEY ANTHROPIC_API_KEY
   use-gh-token 2>/dev/null || true
 }
 
-ai_keychain_env_args() {
-  local -a env_args
-  local github_token
+ai-keychain-env-args() {
+  local -a envArgs
+  local githubToken
   local arg
 
-  github_token="$(keychain_get github.com 2>/dev/null)" || github_token=""
+  githubToken="$(keychain-get github.com 2>/dev/null)" || githubToken=""
 
-  if [[ -n "$github_token" ]]; then
-    env_args+=("GITHUB_TOKEN=$github_token")
-    env_args+=("NPM_TOKEN=$github_token")
-    env_args+=("CHANGELOG_GITHUB_TOKEN=$github_token")
+  if [[ -n "$githubToken" ]]; then
+    envArgs+=("GITHUB_TOKEN=$githubToken")
+    envArgs+=("NPM_TOKEN=$githubToken")
+    envArgs+=("CHANGELOG_GITHUB_TOKEN=$githubToken")
   fi
 
-  arg="$(keychain_env_arg_if_present OPENAI_API_KEY OPENAI_API_KEY)" && [[ -n "$arg" ]] && env_args+=("$arg")
-  arg="$(keychain_env_arg_if_present GEMINI_API_KEY GEMINI_API_KEY)" && [[ -n "$arg" ]] && env_args+=("$arg")
-  arg="$(keychain_env_arg_if_present GOOGLE_API_KEY GOOGLE_API_KEY)" && [[ -n "$arg" ]] && env_args+=("$arg")
-  arg="$(keychain_env_arg_if_present ANTHROPIC_API_KEY ANTHROPIC_API_KEY)" && [[ -n "$arg" ]] && env_args+=("$arg")
+  arg="$(keychain-env-arg-if-present OPENAI_API_KEY OPENAI_API_KEY)" && [[ -n "$arg" ]] && envArgs+=("$arg")
+  arg="$(keychain-env-arg-if-present GEMINI_API_KEY GEMINI_API_KEY)" && [[ -n "$arg" ]] && envArgs+=("$arg")
+  arg="$(keychain-env-arg-if-present GOOGLE_API_KEY GOOGLE_API_KEY)" && [[ -n "$arg" ]] && envArgs+=("$arg")
+  arg="$(keychain-env-arg-if-present ANTHROPIC_API_KEY ANTHROPIC_API_KEY)" && [[ -n "$arg" ]] && envArgs+=("$arg")
 
-  print -r -- "${env_args[@]}"
+  print -rl -- "${envArgs[@]}"
 }
 
 gemini() {
-  local -a env_args
-  local exit_code
-  local env_output
+  local -a envArgs
+  local exitCode
+  local envOutput
 
-  env_output="$(ai_keychain_env_args)"
-  [[ -n "$env_output" ]] && env_args=("${(@f)env_output}")
+  envOutput="$(ai-keychain-env-args)"
+  [[ -n "$envOutput" ]] && envArgs=("${(@f)envOutput}")
   echo -ne "\033]0;gemini\007"
 
-  if (( ${#env_args[@]} )); then
-    command env "${env_args[@]}" gemini "$@"
-    exit_code=$?
+  if (( ${#envArgs[@]} )); then
+    command env "${envArgs[@]}" gemini "$@"
+    exitCode=$?
   else
     command gemini "$@"
-    exit_code=$?
+    exitCode=$?
   fi
 
   echo -ne "\033]0;zsh\007"
-  return $exit_code
+  return $exitCode
 }
 
 gemini-auth() {
   gemini "$@"
 }
 
-package_registry_env_args() {
-  local github_token
-  github_token="$(keychain_get github.com 2>/dev/null)" || github_token=""
+package-registry-env-args() {
+  local githubToken
+  githubToken="$(keychain-get github.com 2>/dev/null)" || githubToken=""
 
-  if [[ -n "$github_token" ]]; then
-    print -r -- "GITHUB_TOKEN=$github_token"
-    print -r -- "NPM_TOKEN=$github_token"
-    print -r -- "CHANGELOG_GITHUB_TOKEN=$github_token"
+  if [[ -n "$githubToken" ]]; then
+    print -r -- "GITHUB_TOKEN=$githubToken"
+    print -r -- "NPM_TOKEN=$githubToken"
+    print -r -- "CHANGELOG_GITHUB_TOKEN=$githubToken"
   fi
 }
 
@@ -685,14 +607,14 @@ with-package-auth() {
   local cmd="$1"
   shift
 
-  local -a env_args
-  local env_output
+  local -a envArgs
+  local envOutput
 
-  env_output="$(package_registry_env_args)"
-  [[ -n "$env_output" ]] && env_args=("${(@f)env_output}")
+  envOutput="$(package-registry-env-args)"
+  [[ -n "$envOutput" ]] && envArgs=("${(@f)envOutput}")
 
-  if (( ${#env_args[@]} )); then
-    command env "${env_args[@]}" "$cmd" "$@"
+  if (( ${#envArgs[@]} )); then
+    command env "${envArgs[@]}" "$cmd" "$@"
   else
     command "$cmd" "$@"
   fi
@@ -774,6 +696,16 @@ if [[ -d "$HOME/.docker/completions" ]]; then
   autoload -Uz compinit
   compinit
 fi
+
+# Register completions after any existing completion initialization.
+if (( ! $+functions[compdef] )); then
+  autoload -Uz compinit
+  compinit
+fi
+compdef keychain-completion keychain kc
+compdef keychain-service-completion keychain-get keychain-has keychain-set keychain-copy keychain-delete keychain-audit
+compdef keychain-completion keychain-help keychain-list keychain-search keychain-get keychain-has keychain-set keychain-copy keychain-delete keychain-audit keychain kc
+compdef keychain-direct-completion keychain-get keychain-has keychain-set keychain-copy keychain-delete
 
 # ───────────────────────────────────────────────────────────────
 # 🎨 PROMPT + FINAL PATH DEDUPE
